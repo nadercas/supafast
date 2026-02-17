@@ -827,9 +827,26 @@ export default function SupabaseDeployer() {
 
               <SectionLabel>Options</SectionLabel>
               <div style={{ display: "flex", gap: 10, marginBottom: 16 }}>
-                <Toggle label="Authelia 2FA" on={config.enableAuthelia} set={(v) => update("enableAuthelia", v)} />
-                <Toggle label="Redis Sessions" on={config.enableRedis} set={(v) => update("enableRedis", v)} />
+                <Toggle
+                  label="Authelia 2FA"
+                  on={config.enableAuthelia}
+                  set={(v) => {
+                    update("enableAuthelia", v);
+                    if (!v) update("enableRedis", false); // Auto-disable Redis when Authelia is off
+                  }}
+                />
+                <Toggle
+                  label="Redis Sessions"
+                  on={config.enableRedis && config.enableAuthelia}
+                  set={(v) => update("enableRedis", v)}
+                  disabled={!config.enableAuthelia}
+                />
               </div>
+              {!config.enableAuthelia && (
+                <div style={{ fontSize: 11, color: C.dim, marginTop: -8, marginBottom: 16 }}>
+                  Redis is only used for Authelia sessions. Enable Authelia to use Redis.
+                </div>
+              )}
 
               <SectionLabel>Storage Box (Backups)</SectionLabel>
               <Card style={{ background: "#0c1a14", borderColor: "#1a3a28", color: "#6ee7b7", fontSize: 12, lineHeight: 1.7, padding: "12px 16px", marginBottom: 14 }}>
@@ -1232,12 +1249,13 @@ function Opt({ children, selected, onClick, style = {} }) {
   }}>{children}</div>;
 }
 
-function Toggle({ label, on, set }) {
+function Toggle({ label, on, set, disabled }) {
   return (
-    <div onClick={() => set(!on)} style={{
+    <div onClick={() => !disabled && set(!on)} style={{
       flex: 1, display: "flex", alignItems: "center", justifyContent: "space-between",
       padding: "10px 14px", background: C.surface, border: `1px solid ${C.border}`,
-      borderRadius: 8, cursor: "pointer",
+      borderRadius: 8, cursor: disabled ? "not-allowed" : "pointer",
+      opacity: disabled ? 0.5 : 1,
     }}>
       <span style={{ fontSize: 12 }}>{label}</span>
       <div style={{ width: 36, height: 20, borderRadius: 10, background: on ? C.greenDark : "#2a2a30", position: "relative", transition: "background 0.2s" }}>
