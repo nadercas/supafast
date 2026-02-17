@@ -1591,7 +1591,7 @@ services:
 
   docker-socket-proxy:
     container_name: docker-socket-proxy
-    image: ghcr.io/tecnativa/docker-socket-proxy:0.4.2
+    image: tecnativa/docker-socket-proxy:latest
     restart: unless-stopped
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
