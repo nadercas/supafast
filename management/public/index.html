@@ -1,0 +1,554 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Supabase Management</title>
+<style>
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#0a0a0b;--surface:#111114;--surface-alt:#161619;--border:#1e1e23;
+    --text:#e4e4e7;--muted:#a1a1aa;--dim:#52525b;
+    --green:#3ecf8e;--green-dark:#1a9f60;
+    --red:#ef4444;--yellow:#eab308;--blue:#3b82f6;
+    --radius:8px;--radius-sm:4px;
+  }
+  body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;font-size:14px;line-height:1.5}
+  a{color:var(--green);text-decoration:none}
+
+  /* Header */
+  .header{background:var(--surface);border-bottom:1px solid var(--border);padding:16px 24px;display:flex;align-items:center;justify-content:space-between}
+  .header h1{font-size:18px;font-weight:600}
+  .header h1 span{color:var(--green)}
+  .header .status{font-size:12px;color:var(--muted)}
+
+  /* Tabs */
+  .tabs{display:flex;gap:0;background:var(--surface);border-bottom:1px solid var(--border);padding:0 24px;overflow-x:auto}
+  .tab{padding:10px 18px;cursor:pointer;color:var(--muted);font-size:13px;font-weight:500;border-bottom:2px solid transparent;transition:all .15s;white-space:nowrap;user-select:none}
+  .tab:hover{color:var(--text)}
+  .tab.active{color:var(--green);border-bottom-color:var(--green)}
+
+  /* Content */
+  .content{max-width:1200px;margin:0 auto;padding:24px}
+  .panel{display:none}
+  .panel.active{display:block}
+
+  /* Cards */
+  .grid{display:grid;gap:16px}
+  .grid-4{grid-template-columns:repeat(auto-fit,minmax(220px,1fr))}
+  .card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:20px}
+  .card h3{font-size:12px;text-transform:uppercase;color:var(--muted);letter-spacing:.5px;margin-bottom:8px}
+  .card .value{font-size:28px;font-weight:700}
+  .card .sub{font-size:12px;color:var(--dim);margin-top:4px}
+
+  /* Progress bar */
+  .progress{height:6px;background:var(--border);border-radius:3px;margin-top:10px;overflow:hidden}
+  .progress .fill{height:100%;border-radius:3px;transition:width .5s}
+  .fill-green{background:var(--green)}
+  .fill-yellow{background:var(--yellow)}
+  .fill-red{background:var(--red)}
+
+  /* Tables */
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th{text-align:left;padding:10px 12px;color:var(--muted);font-weight:500;border-bottom:1px solid var(--border);font-size:11px;text-transform:uppercase;letter-spacing:.5px}
+  td{padding:10px 12px;border-bottom:1px solid var(--border)}
+  tr:hover{background:var(--surface-alt)}
+
+  /* Status dots */
+  .dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:6px}
+  .dot-green{background:var(--green)}
+  .dot-yellow{background:var(--yellow)}
+  .dot-red{background:var(--red)}
+
+  /* Buttons */
+  .btn{display:inline-flex;align-items:center;gap:6px;padding:7px 14px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--surface-alt);color:var(--text);cursor:pointer;font-size:13px;transition:all .15s}
+  .btn:hover{border-color:var(--dim)}
+  .btn:disabled{opacity:.5;cursor:not-allowed}
+  .btn-green{background:var(--green-dark);border-color:var(--green-dark);color:#fff}
+  .btn-green:hover{background:var(--green)}
+  .btn-red{background:#7f1d1d;border-color:#7f1d1d;color:#fca5a5}
+  .btn-red:hover{background:#991b1b}
+  .btn-sm{padding:4px 10px;font-size:12px}
+  .actions{display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap}
+
+  /* Modal */
+  .modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:100;align-items:center;justify-content:center}
+  .modal-overlay.open{display:flex}
+  .modal{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);width:90%;max-width:900px;max-height:80vh;display:flex;flex-direction:column}
+  .modal-header{display:flex;justify-content:space-between;align-items:center;padding:16px 20px;border-bottom:1px solid var(--border)}
+  .modal-header h2{font-size:15px;font-weight:600}
+  .modal-close{background:none;border:none;color:var(--muted);cursor:pointer;font-size:20px;padding:4px 8px}
+  .modal-close:hover{color:var(--text)}
+  .modal-body{padding:16px 20px;overflow-y:auto;flex:1}
+  .log-output{background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-sm);padding:12px;font-family:'SF Mono',Monaco,Consolas,monospace;font-size:12px;line-height:1.6;white-space:pre-wrap;word-break:break-all;max-height:60vh;overflow-y:auto;color:var(--muted)}
+
+  /* Toast */
+  .toast-container{position:fixed;top:20px;right:20px;z-index:200;display:flex;flex-direction:column;gap:8px}
+  .toast{padding:12px 18px;border-radius:var(--radius-sm);font-size:13px;animation:slideIn .2s;box-shadow:0 4px 12px rgba(0,0,0,.4)}
+  .toast-success{background:#14532d;color:#86efac;border:1px solid #166534}
+  .toast-error{background:#7f1d1d;color:#fca5a5;border:1px solid #991b1b}
+  .toast-info{background:#1e3a5f;color:#93c5fd;border:1px solid #1e40af}
+  @keyframes slideIn{from{transform:translateX(100%);opacity:0}to{transform:translateX(0);opacity:1}}
+
+  /* Section titles */
+  .section-title{font-size:15px;font-weight:600;margin-bottom:12px;margin-top:24px}
+  .section-title:first-child{margin-top:0}
+
+  /* Misc */
+  .mono{font-family:'SF Mono',Monaco,Consolas,monospace;font-size:12px}
+  .text-muted{color:var(--muted)}
+  .text-dim{color:var(--dim)}
+  .mb-16{margin-bottom:16px}
+  .mt-8{margin-top:8px}
+  .flex-between{display:flex;justify-content:space-between;align-items:center}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1><span>Supabase</span> Management <span style="color:var(--dim)">·</span> <span id="serverName">{{SERVER_NAME}}</span></h1>
+  <div class="status" id="headerStatus">Connecting...</div>
+</div>
+
+<div class="tabs" id="tabBar">
+  <div class="tab active" data-tab="dashboard">Dashboard</div>
+  <div class="tab" data-tab="containers">Containers</div>
+  <div class="tab" data-tab="updates">Updates</div>
+  <div class="tab" data-tab="backups">Backups</div>
+  <div class="tab" data-tab="security">Security</div>
+  <div class="tab" data-tab="logs">Logs</div>
+</div>
+
+<div class="content">
+
+  <!-- Dashboard -->
+  <div class="panel active" id="panel-dashboard">
+    <div class="grid grid-4 mb-16" id="metricCards"></div>
+    <div class="flex-between mb-16">
+      <h3 class="section-title" style="margin:0">Containers</h3>
+      <button class="btn btn-red btn-sm" onclick="restartAll()">Restart All</button>
+    </div>
+    <div class="card" style="padding:0;overflow:hidden">
+      <table>
+        <thead><tr><th>Name</th><th>Status</th><th>Image</th></tr></thead>
+        <tbody id="dashContainers"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Containers -->
+  <div class="panel" id="panel-containers">
+    <h3 class="section-title">All Containers</h3>
+    <div class="card" style="padding:0;overflow:hidden">
+      <table>
+        <thead><tr><th>Name</th><th>Status</th><th>Health</th><th>Image</th><th>Actions</th></tr></thead>
+        <tbody id="containerTable"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Updates -->
+  <div class="panel" id="panel-updates">
+    <div class="actions">
+      <button class="btn btn-green" onclick="checkUpdates()">Check for Updates</button>
+      <button class="btn" onclick="pullAll()">Pull All</button>
+      <button class="btn btn-green" onclick="applyUpdates()">Apply Updates</button>
+    </div>
+    <div class="card" style="padding:0;overflow:hidden">
+      <table>
+        <thead><tr><th>Service</th><th>Image</th><th>Image ID</th><th>Status</th><th>Actions</th></tr></thead>
+        <tbody id="updateTable"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Backups -->
+  <div class="panel" id="panel-backups">
+    <div class="actions">
+      <button class="btn btn-green" onclick="runBackup()">Run Backup Now</button>
+    </div>
+    <div class="grid grid-4 mb-16" id="backupInfo"></div>
+    <h3 class="section-title">Snapshots</h3>
+    <div class="card" style="padding:0;overflow:hidden">
+      <table>
+        <thead><tr><th>ID</th><th>Date</th><th>Hostname</th><th>Tags</th></tr></thead>
+        <tbody id="snapshotTable"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Security -->
+  <div class="panel" id="panel-security">
+    <h3 class="section-title">Fail2ban - Banned IPs</h3>
+    <div class="card" style="padding:0;overflow:hidden">
+      <table>
+        <thead><tr><th>IP Address</th><th>Ban Time</th></tr></thead>
+        <tbody id="fail2banTable"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Logs -->
+  <div class="panel" id="panel-logs">
+    <div class="flex-between">
+      <h3 class="section-title" style="margin:0">Deploy Log</h3>
+      <button class="btn btn-sm" onclick="loadDeployLog()">Refresh</button>
+    </div>
+    <div class="card mt-8 mb-16">
+      <pre class="log-output" id="deployLog" style="max-height:400px">Loading...</pre>
+    </div>
+    <div class="flex-between">
+      <h3 class="section-title" style="margin:0">Backup Log</h3>
+      <button class="btn btn-sm" onclick="loadBackupLog()">Refresh</button>
+    </div>
+    <div class="card mt-8">
+      <pre class="log-output" id="backupLog" style="max-height:400px">Loading...</pre>
+    </div>
+  </div>
+
+</div>
+
+<!-- Logs Modal -->
+<div class="modal-overlay" id="logModal">
+  <div class="modal">
+    <div class="modal-header">
+      <h2 id="logModalTitle">Container Logs</h2>
+      <button class="modal-close" onclick="closeLogModal()">&times;</button>
+    </div>
+    <div class="modal-body">
+      <pre class="log-output" id="logModalContent">Loading...</pre>
+    </div>
+  </div>
+</div>
+
+<!-- Toast Container -->
+<div class="toast-container" id="toasts"></div>
+
+<script>
+// --- State ---
+let activeTab = 'dashboard';
+let refreshTimer = null;
+
+// --- Tabs ---
+document.getElementById('tabBar').addEventListener('click', (e) => {
+  if (!e.target.classList.contains('tab')) return;
+  const tab = e.target.dataset.tab;
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  e.target.classList.add('active');
+  document.getElementById('panel-' + tab).classList.add('active');
+  activeTab = tab;
+  loadTab(tab);
+});
+
+// --- Toast ---
+function toast(msg, type = 'info') {
+  const el = document.createElement('div');
+  el.className = 'toast toast-' + type;
+  el.textContent = msg;
+  document.getElementById('toasts').appendChild(el);
+  setTimeout(() => el.remove(), 4000);
+}
+
+// --- API Helper ---
+async function api(url, opts = {}) {
+  try {
+    const res = await fetch(url, opts);
+    const data = await res.json();
+    if (!res.ok) {
+      toast(data.error || 'Request failed', 'error');
+      return null;
+    }
+    return data;
+  } catch (err) {
+    toast('Network error: ' + err.message, 'error');
+    return null;
+  }
+}
+
+// --- Format Helpers ---
+function formatBytes(kb) {
+  if (kb < 1024) return kb + ' KB';
+  if (kb < 1048576) return (kb / 1024).toFixed(1) + ' MB';
+  return (kb / 1048576).toFixed(1) + ' GB';
+}
+
+function formatBytesRaw(b) {
+  if (b < 1024) return b + ' B';
+  if (b < 1048576) return (b / 1024).toFixed(1) + ' KB';
+  if (b < 1073741824) return (b / 1048576).toFixed(1) + ' MB';
+  return (b / 1073741824).toFixed(1) + ' GB';
+}
+
+function formatUptime(sec) {
+  const d = Math.floor(sec / 86400);
+  const h = Math.floor((sec % 86400) / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  if (d > 0) return d + 'd ' + h + 'h';
+  if (h > 0) return h + 'h ' + m + 'm';
+  return m + 'm';
+}
+
+function progressColor(pct) {
+  if (pct >= 90) return 'fill-red';
+  if (pct >= 70) return 'fill-yellow';
+  return 'fill-green';
+}
+
+function statusDot(health) {
+  if (health === 'healthy') return '<span class="dot dot-green"></span>';
+  if (health === 'running') return '<span class="dot dot-yellow"></span>';
+  return '<span class="dot dot-red"></span>';
+}
+
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+// --- Dashboard ---
+async function loadDashboard() {
+  const [resources, system, containers] = await Promise.all([
+    api('/api/resources'),
+    api('/api/system'),
+    api('/api/containers'),
+  ]);
+
+  if (system) {
+    document.getElementById('headerStatus').textContent =
+      system.hostname + ' | ' + system.ip + ' | Up ' + formatUptime(system.uptime);
+  }
+
+  if (resources) {
+    const cards = [
+      { label: 'CPU Usage', value: resources.cpu.percent + '%', sub: '', pct: resources.cpu.percent },
+      { label: 'RAM Usage', value: resources.ram.percent + '%', sub: formatBytes(resources.ram.used) + ' / ' + formatBytes(resources.ram.total), pct: resources.ram.percent },
+      { label: 'Swap Usage', value: resources.swap.percent + '%', sub: formatBytes(resources.swap.used) + ' / ' + formatBytes(resources.swap.total), pct: resources.swap.percent },
+      { label: 'Disk Usage', value: resources.disk.percent + '%', sub: formatBytesRaw(resources.disk.used) + ' / ' + formatBytesRaw(resources.disk.total), pct: resources.disk.percent },
+    ];
+    document.getElementById('metricCards').innerHTML = cards.map(c => `
+      <div class="card">
+        <h3>${c.label}</h3>
+        <div class="value">${c.value}</div>
+        <div class="sub">${c.sub}</div>
+        <div class="progress"><div class="fill ${progressColor(c.pct)}" style="width:${c.pct}%"></div></div>
+      </div>
+    `).join('');
+  }
+
+  if (containers) {
+    document.getElementById('dashContainers').innerHTML = containers.map(c => `
+      <tr>
+        <td><strong>${escapeHtml(c.name)}</strong></td>
+        <td>${statusDot(c.health)}${escapeHtml(c.status)}</td>
+        <td class="mono text-dim">${escapeHtml(c.image)}</td>
+      </tr>
+    `).join('');
+  }
+}
+
+// --- Containers ---
+async function loadContainers() {
+  const containers = await api('/api/containers');
+  if (!containers) return;
+  document.getElementById('containerTable').innerHTML = containers.map(c => `
+    <tr>
+      <td><strong>${escapeHtml(c.name)}</strong></td>
+      <td>${escapeHtml(c.status)}</td>
+      <td>${statusDot(c.health)}${escapeHtml(c.health)}</td>
+      <td class="mono text-dim">${escapeHtml(c.image)}</td>
+      <td>
+        <button class="btn btn-sm" onclick="viewLogs('${c.id}','${escapeHtml(c.name)}')">Logs</button>
+        <button class="btn btn-sm btn-red" onclick="restartContainer('${c.id}')">Restart</button>
+      </td>
+    </tr>
+  `).join('');
+}
+
+async function viewLogs(id, name) {
+  document.getElementById('logModal').classList.add('open');
+  document.getElementById('logModalTitle').textContent = 'Logs: ' + name;
+  document.getElementById('logModalContent').textContent = 'Loading...';
+  const data = await api('/api/containers/' + id + '/logs?lines=200');
+  if (data) {
+    document.getElementById('logModalContent').textContent = data.logs || 'No logs available';
+    const el = document.getElementById('logModalContent');
+    el.scrollTop = el.scrollHeight;
+  }
+}
+
+function closeLogModal() {
+  document.getElementById('logModal').classList.remove('open');
+}
+
+async function restartContainer(id) {
+  toast('Restarting container...', 'info');
+  const data = await api('/api/containers/' + id + '/restart', { method: 'POST' });
+  if (data && data.success) {
+    toast('Container restarted', 'success');
+    loadContainers();
+  }
+}
+
+async function restartAll() {
+  if (!confirm('Restart all Supabase containers?')) return;
+  toast('Restarting all containers...', 'info');
+  const data = await api('/api/containers/restart-all', { method: 'POST' });
+  if (data) {
+    const ok = (data.results || []).filter(r => r.success).length;
+    const fail = (data.results || []).filter(r => !r.success).length;
+    toast(`Restarted ${ok} containers` + (fail ? `, ${fail} failed` : ''), fail ? 'error' : 'success');
+    loadDashboard();
+  }
+}
+
+// --- Updates ---
+async function checkUpdates() {
+  toast('Checking for updates...', 'info');
+  const data = await api('/api/update/check');
+  if (!data || !data.services) return;
+  renderUpdateTable(data.services);
+}
+
+async function loadUpdateImages() {
+  const data = await api('/api/update/images');
+  if (!data) return;
+  renderUpdateTable(data);
+}
+
+function renderUpdateTable(services) {
+  document.getElementById('updateTable').innerHTML = services.map(s => `
+    <tr>
+      <td><strong>${escapeHtml(s.name)}</strong></td>
+      <td class="mono text-dim">${escapeHtml(s.image)}</td>
+      <td class="mono text-dim">${escapeHtml(s.imageId || '')}</td>
+      <td>${s.updateAvailable ? '<span style="color:var(--yellow)">Update available</span>' : '<span style="color:var(--green)">Up to date</span>'}</td>
+      <td><button class="btn btn-sm" onclick="pullService('${escapeHtml(s.name)}')">Pull</button></td>
+    </tr>
+  `).join('');
+}
+
+async function pullAll() {
+  toast('Pulling all images...', 'info');
+  const data = await api('/api/update/pull', { method: 'POST' });
+  if (data && data.success) toast('Pull complete', 'success');
+}
+
+async function pullService(name) {
+  toast('Pulling ' + name + '...', 'info');
+  const data = await api('/api/update/pull/' + name, { method: 'POST' });
+  if (data && data.success) toast(name + ' pulled', 'success');
+}
+
+async function applyUpdates() {
+  if (!confirm('Apply updates? This will recreate containers with new images.')) return;
+  toast('Applying updates...', 'info');
+  const data = await api('/api/update/apply', { method: 'POST' });
+  if (data && data.success) toast('Updates applied', 'success');
+}
+
+// --- Backups ---
+async function loadBackups() {
+  const [status, snapshots] = await Promise.all([
+    api('/api/backup/status'),
+    api('/api/backup/snapshots'),
+  ]);
+
+  if (status) {
+    document.getElementById('backupInfo').innerHTML = `
+      <div class="card"><h3>Last Backup</h3><div class="value" style="font-size:18px">${escapeHtml(status.lastBackup)}</div></div>
+      <div class="card"><h3>Next Scheduled</h3><div class="value" style="font-size:18px">${escapeHtml(status.nextScheduled)}</div></div>
+      <div class="card"><h3>Log Lines</h3><div class="value" style="font-size:18px">${status.logLines}</div></div>
+    `;
+  }
+
+  if (snapshots && Array.isArray(snapshots)) {
+    document.getElementById('snapshotTable').innerHTML = snapshots.length === 0
+      ? '<tr><td colspan="4" class="text-muted">No snapshots found</td></tr>'
+      : snapshots.map(s => `
+          <tr>
+            <td class="mono">${escapeHtml((s.short_id || s.id || '').slice(0, 8))}</td>
+            <td>${escapeHtml(s.time || '')}</td>
+            <td>${escapeHtml(s.hostname || '')}</td>
+            <td>${(s.tags || []).map(t => escapeHtml(t)).join(', ') || '-'}</td>
+          </tr>
+        `).join('');
+  }
+}
+
+async function runBackup() {
+  toast('Backup triggered...', 'info');
+  const data = await api('/api/backup/run', { method: 'POST' });
+  if (data && data.success) toast('Backup started in background', 'success');
+}
+
+// --- Security ---
+async function loadSecurity() {
+  const f2b = await api('/api/security/fail2ban');
+  if (f2b) {
+    document.getElementById('fail2banTable').innerHTML = f2b.banned.length === 0
+      ? '<tr><td colspan="2" class="text-muted">No banned IPs</td></tr>'
+      : f2b.banned.map(b => `
+          <tr><td class="mono">${escapeHtml(b.ip)}</td><td>${escapeHtml(b.time)}</td></tr>
+        `).join('');
+  }
+}
+
+// --- Logs ---
+async function loadDeployLog() {
+  const data = await api('/api/logs/deploy');
+  document.getElementById('deployLog').textContent = data ? (data.log || 'No logs') : 'Failed to load';
+  const el = document.getElementById('deployLog');
+  el.scrollTop = el.scrollHeight;
+}
+
+async function loadBackupLog() {
+  const data = await api('/api/logs/backup');
+  document.getElementById('backupLog').textContent = data ? (data.log || 'No logs') : 'Failed to load';
+  const el = document.getElementById('backupLog');
+  el.scrollTop = el.scrollHeight;
+}
+
+// --- Tab Loading ---
+function loadTab(tab) {
+  clearInterval(refreshTimer);
+  switch (tab) {
+    case 'dashboard':
+      loadDashboard();
+      refreshTimer = setInterval(loadDashboard, 5000);
+      break;
+    case 'containers':
+      loadContainers();
+      break;
+    case 'updates':
+      loadUpdateImages();
+      break;
+    case 'backups':
+      loadBackups();
+      break;
+    case 'security':
+      loadSecurity();
+      break;
+    case 'logs':
+      loadDeployLog();
+      loadBackupLog();
+      break;
+  }
+}
+
+// Close modal on overlay click
+document.getElementById('logModal').addEventListener('click', (e) => {
+  if (e.target === e.currentTarget) closeLogModal();
+});
+
+// Close modal on Escape
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') closeLogModal();
+});
+
+// Initial load
+loadTab('dashboard');
+</script>
+</body>
+</html>
