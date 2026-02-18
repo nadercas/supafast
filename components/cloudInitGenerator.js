@@ -82,8 +82,8 @@ async function gzipAndBase64(data) {
 // They do NOT need JS interpolation — any runtime variables use
 // Docker Compose ${VAR} or tool-specific syntax (Kong $VAR, Vector ${VAR}, etc.)
 
-function getKongYml() {
-  return `_format_version: '2.1'
+function getKongYml(anonKey, serviceRoleKey, dashboardUsername, dashboardPassword) {
+  return `_format_version: "2.1"
 _transform: true
 
 ###
@@ -93,10 +93,10 @@ consumers:
   - username: DASHBOARD
   - username: anon
     keyauth_credentials:
-      - key: $SUPABASE_ANON_KEY
+      - key: ${anonKey}
   - username: service_role
     keyauth_credentials:
-      - key: $SUPABASE_SERVICE_KEY
+      - key: ${serviceRoleKey}
 
 ###
 ### Access Control List
@@ -112,8 +112,8 @@ acls:
 ###
 basicauth_credentials:
   - consumer: DASHBOARD
-    username: '$DASHBOARD_USERNAME'
-    password: '$DASHBOARD_PASSWORD'
+    username: "${dashboardUsername}"
+    password: "${dashboardPassword}"
 
 ###
 ### API Routes
@@ -1030,10 +1030,10 @@ JWT_SECRET=${secrets.jwtSecret}
 ANON_KEY=${secrets.anonKey}
 SERVICE_ROLE_KEY=${secrets.serviceRoleKey}
 DASHBOARD_USERNAME=supabase
-DASHBOARD_PASSWORD=not_being_used
 SECRET_KEY_BASE=${secrets.secretKeyBase}
 VAULT_ENC_KEY=${secrets.vaultEncKey}
 PG_META_CRYPTO_KEY=${secrets.pgMetaCryptoKey}
+RESTIC_PASSWORD=${secrets.resticPassword}
 
 ############
 # Database
@@ -1192,7 +1192,7 @@ services:
     image: kong:2.8.1
     restart: unless-stopped
     volumes:
-      - ./volumes/api/kong.yml:/home/kong/temp.yml:ro,z
+      - ./volumes/api/kong.yml:/home/kong/kong.yml:ro,z
     depends_on:
       analytics:
         condition: service_healthy
@@ -1203,11 +1203,6 @@ services:
       KONG_PLUGINS: request-transformer,cors,key-auth,acl,basic-auth,request-termination,ip-restriction
       KONG_NGINX_PROXY_PROXY_BUFFER_SIZE: 160k
       KONG_NGINX_PROXY_PROXY_BUFFERS: 64 160k
-      SUPABASE_ANON_KEY: \${ANON_KEY}
-      SUPABASE_SERVICE_KEY: \${SERVICE_ROLE_KEY}
-      DASHBOARD_USERNAME: \${DASHBOARD_USERNAME}
-      DASHBOARD_PASSWORD: \${DASHBOARD_PASSWORD}
-    entrypoint: bash -c 'eval "echo "$$(cat ~/temp.yml)"" > ~/kong.yml && /docker-entrypoint.sh kong docker-start'
 
   auth:
     container_name: supabase-auth
@@ -1517,6 +1512,10 @@ services:
     container_name: supabase-pooler
     image: supabase/supavisor:2.7.4
     restart: unless-stopped
+    ulimits:
+      nofile:
+        soft: 100000
+        hard: 100000
     ports:
       - \${POSTGRES_PORT}:5432
       - \${POOLER_PROXY_PORT_TRANSACTION}:6543
@@ -1726,13 +1725,22 @@ server:
 
 totp:
   disable: false
-  issuer: "authelia.com"
+  issuer: "${host}"
+  period: 30
+  skew: 1
 
 identity_validation:
   reset_password:
     jwt_lifespan: "5 minutes"
     jwt_algorithm: "HS256"
     jwt_secret: '{{ env "AUTHELIA_IDENTITY_VALIDATION_RESET_PASSWORD_JWT_SECRET" }}'
+  elevated_session:
+    # Skip email verification for 2FA device registration on first login.
+    # Users are shown the TOTP QR code inline during their first login.
+    require_second_factor: false
+    skip_second_factor: true
+    elevation_lifespan: "10m"
+    characters: 8
 
 authentication_backend:
   refresh_interval: "5 minutes"
@@ -1754,8 +1762,19 @@ authentication_backend:
 access_control:
   default_policy: "deny"
   rules:
+    # Supabase API paths bypass Authelia (handled by Kong key-auth)
     - domain: "${host}"
-      policy: "one_factor"
+      policy: "bypass"
+      resources:
+        - "^/rest/v1(/.*)?$"
+        - "^/auth/v1(/.*)?$"
+        - "^/realtime/v1(/.*)?$"
+        - "^/storage/v1(/.*)?$"
+        - "^/functions/v1(/.*)?$"
+        - "^/graphql/v1(/.*)?$"
+    # Dashboard and Studio require two_factor — enrollment QR shown on first login
+    - domain: "${host}"
+      policy: "two_factor"
 
 session:
   secret: '{{ env "AUTHELIA_SESSION_SECRET" }}'
@@ -1771,9 +1790,9 @@ session:
     port: 6379` : ''}
 
 regulation:
-  max_retries: 3
-  find_time: "30 minutes"
-  ban_time: "60 minutes"
+  max_retries: 5
+  find_time: "2 minutes"
+  ban_time: "10 minutes"
 
 storage:
   encryption_key: '{{ env "AUTHELIA_STORAGE_ENCRYPTION_KEY" }}'
@@ -1787,7 +1806,8 @@ storage:
     timeout: "5 seconds"
 
 notifier:
-  disable_startup_check: false
+  # filesystem notifier can't send real emails — disable the startup connectivity check
+  disable_startup_check: true
 
   filesystem:
     filename: "/config/notification.txt"
@@ -1873,7 +1893,7 @@ export async function generateCloudInit(config, secrets) {
 
   // Build tarball of static config files
   const tarFiles = [
-    { name: 'volumes/api/kong.yml', content: getKongYml() },
+    { name: 'volumes/api/kong.yml', content: getKongYml(secrets.anonKey, secrets.serviceRoleKey, 'supabase', 'not_being_used') },
     { name: 'volumes/db/realtime.sql', content: getRealtimeSql() },
     { name: 'volumes/db/roles.sql', content: getRolesSql() },
     { name: 'volumes/db/webhooks.sql', content: getWebhooksSql() },
@@ -2045,7 +2065,7 @@ TOTAL_RAM_MB=\${TOTAL_RAM_MB:-4096}
 if [ "$TOTAL_RAM_MB" -ge 16384 ]; then FD=524288; SOMAX=4096; TCP_RMEM="4096 87380 16777216"; TCP_WMEM="4096 65536 16777216"; NETDEV_BUDGET=600
 elif [ "$TOTAL_RAM_MB" -ge 8192 ]; then FD=262144; SOMAX=4096; TCP_RMEM="4096 87380 16777216"; TCP_WMEM="4096 65536 16777216"; NETDEV_BUDGET=600
 elif [ "$TOTAL_RAM_MB" -ge 4096 ]; then FD=131072; SOMAX=2048; TCP_RMEM="4096 87380 6291456"; TCP_WMEM="4096 65536 6291456"; NETDEV_BUDGET=300
-else FD=65536; SOMAX=2048; TCP_RMEM="4096 87380 6291456"; TCP_WMEM="4096 65536 6291456"; NETDEV_BUDGET=300; fi
+else FD=131072; SOMAX=2048; TCP_RMEM="4096 87380 6291456"; TCP_WMEM="4096 65536 6291456"; NETDEV_BUDGET=300; fi
 
 cat > /etc/sysctl.d/99-performance.conf <<PERF
 fs.file-max = $FD
