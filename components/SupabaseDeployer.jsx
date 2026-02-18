@@ -40,6 +40,18 @@ const hex = (n) => {
   return [...a].map((b) => b.toString(16).padStart(2, "0")).join("");
 };
 
+const BASE32_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+function base32Encode(bytes) {
+  let bits = 0, value = 0, out = "";
+  for (const byte of bytes) {
+    value = (value << 8) | byte;
+    bits += 8;
+    while (bits >= 5) { out += BASE32_CHARS[(value >>> (bits - 5)) & 31]; bits -= 5; }
+  }
+  if (bits > 0) out += BASE32_CHARS[(value << (5 - bits)) & 31];
+  return out;
+}
+
 const b64url = (str) =>
   btoa(str).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 
@@ -160,6 +172,8 @@ async function generateSshKeypair(serverName) {
 
 async function generateAllSecrets() {
   const jwtSecret = hex(20);
+  const totpRaw = new Uint8Array(20);
+  crypto.getRandomValues(totpRaw);
   const [anonKey, serviceRoleKey] = await Promise.all([
     generateJwt(jwtSecret, "anon"),
     generateJwt(jwtSecret, "service_role"),
@@ -181,6 +195,7 @@ async function generateAllSecrets() {
     autheliaStorageEncKey: hex(32),
     autheliaJwtSecret: hex(32),
     resticPassword: hex(24),
+    totpSecret: base32Encode(totpRaw),
   };
 }
 
@@ -1067,6 +1082,7 @@ export default function SupabaseDeployer() {
                   ["Postgres Password", secrets?.postgresPassword],
                   ["Restic Backup Password", secrets?.resticPassword],
                   ["Storage Box", `${config.storageBoxUser}@${config.storageBoxHost}`],
+                  ...(config.enableAuthelia ? [["2FA Secret (TOTP)", secrets?.totpSecret]] : []),
                 ].map(([k, v], i, arr) => (
                   <div key={k} style={{
                     display: "flex", justifyContent: "space-between", alignItems: "center",
@@ -1130,20 +1146,7 @@ export default function SupabaseDeployer() {
               {config.enableAuthelia && (
                 <Card style={{ background: "#0c1219", borderColor: "#1a2f4a", color: "#93c5fd", fontSize: 12, lineHeight: 1.8, padding: "14px 16px", marginTop: 14 }}>
                   <strong>Authenticator App Setup (2FA)</strong><br />
-                  Your TOTP secret was pre-registered during deployment — no email needed. To add it to your authenticator app:<br />
-                  <div style={{ margin: "8px 0 4px" }}>
-                    1. SSH into your server:<br />
-                    <code style={{ background: "#0a0f18", padding: "3px 7px", borderRadius: 3, display: "inline-block", marginTop: 2 }}>
-                      {`ssh -i ~/.ssh/${config.serverName} ${config.deployUser}@${serverIp}`}
-                    </code>
-                  </div>
-                  <div style={{ margin: "4px 0" }}>
-                    2. Get your TOTP secret:<br />
-                    <code style={{ background: "#0a0f18", padding: "3px 7px", borderRadius: 3, display: "inline-block", marginTop: 2 }}>
-                      cat ~/supabase-credentials.txt
-                    </code>
-                  </div>
-                  3. Copy the <code style={{ background: "#0a0f18", padding: "1px 5px", borderRadius: 3 }}>TOTP_URI</code> and import it into Google Authenticator, Authy, or 1Password — or manually enter the <code style={{ background: "#0a0f18", padding: "1px 5px", borderRadius: 3 }}>TOTP_SECRET</code> key.
+                  Copy the <strong>2FA Secret (TOTP)</strong> above and add it to Google Authenticator, Authy, or 1Password as a manual entry. That&apos;s it — no email, no portal, no SSH needed.
                 </Card>
               )}
             </FadeIn>

@@ -2281,40 +2281,38 @@ for svc in supabase-db supabase-kong caddy-container; do
   fi
 done
 ${enableAuthelia ? `
-# ── Pre-register TOTP for Authelia (no email/SMTP required) ──────────────────
-# Authelia requires identity verification (email OTC) before registering a
-# TOTP device from the portal. Since we have no SMTP, we use the Authelia CLI
-# to register the TOTP secret directly in the database during deployment.
-# The user adds this secret to their authenticator app from the credentials file.
-echo "Waiting for Authelia to be ready..."
+# ── Register pre-generated TOTP secret in Authelia DB ────────────────────────
+# The TOTP secret was generated in the browser and shown in the deployer
+# credentials page. We insert it directly into Postgres so Authelia recognises
+# it immediately — no email, no SMTP, no portal interaction needed.
+echo "Registering TOTP secret in Authelia database..."
 for i in $(seq 1 24); do
-  if docker exec authelia authelia storage user list >/dev/null 2>&1; then
-    echo "Authelia storage is ready."
+  if docker exec supabase-db pg_isready -U postgres -q 2>/dev/null; then
+    echo "Postgres is ready."
     break
   fi
   echo "  attempt $i/24 — waiting 5s..."
   sleep 5
 done
 
-TOTP_URI=$(docker exec authelia authelia storage user totp generate "${supabaseUser}" 2>&1 | grep -oP 'otpauth://[^\\s]+' || true)
-if [ -n "$TOTP_URI" ]; then
-  CREDS_FILE="/home/${deployUser}/supabase-credentials.txt"
-  cat >> "$CREDS_FILE" <<CREDSEOF
+# Decode base32 secret to hex, then insert into Authelia's totp_configurations
+TOTP_HEX=$(python3 -c "
+import base64, sys
+s = '${secrets.totpSecret}'
+pad = (8 - len(s) % 8) % 8
+sys.stdout.write(base64.b32decode(s + '=' * pad, casefold=True).hex())
+" 2>/dev/null)
 
-# ── Authelia 2FA (TOTP) ──────────────────────────────────────────────────────
-# Import this URI into any authenticator app (Google Authenticator, Authy,
-# 1Password, etc.) by scanning the QR code at https://qr.is/otpauth or
-# by adding the account manually using the secret key below.
-TOTP_URI=$TOTP_URI
-TOTP_SECRET=$(echo "$TOTP_URI" | grep -oP 'secret=\\K[^&]+' || echo "see URI above")
-# ─────────────────────────────────────────────────────────────────────────────
-CREDSEOF
-  chmod 600 "$CREDS_FILE"
-  chown "${deployUser}:${deployUser}" "$CREDS_FILE"
-  echo "TOTP pre-registered. Secret saved to $CREDS_FILE"
+if [ -n "$TOTP_HEX" ]; then
+  docker exec supabase-db psql -U postgres -d postgres -c "
+    INSERT INTO authelia.totp_configurations
+      (username, issuer, algorithm, digits, period, secret)
+    VALUES
+      ('${supabaseUser}', '${config.domain.replace(/^https?:\/\//, '')}', 'SHA1', 6, 30, decode('$TOTP_HEX', 'hex'))
+    ON CONFLICT (username) DO NOTHING;
+  " && echo "TOTP registered successfully." || echo "WARNING: TOTP insert failed."
 else
-  echo "WARNING: Could not pre-register TOTP. You can register manually after deployment:"
-  echo "  docker exec authelia authelia storage user totp generate ${supabaseUser}"
+  echo "WARNING: Could not decode TOTP secret."
 fi
 ` : ''}
 update_status "supabase_done"
