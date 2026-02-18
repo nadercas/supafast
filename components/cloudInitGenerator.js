@@ -1734,13 +1734,6 @@ identity_validation:
     jwt_lifespan: "5 minutes"
     jwt_algorithm: "HS256"
     jwt_secret: '{{ env "AUTHELIA_IDENTITY_VALIDATION_RESET_PASSWORD_JWT_SECRET" }}'
-  elevated_session:
-    # Skip email verification for 2FA device registration on first login.
-    # Users are shown the TOTP QR code inline during their first login.
-    require_second_factor: false
-    skip_second_factor: true
-    elevation_lifespan: "10m"
-    characters: 8
 
 authentication_backend:
   refresh_interval: "5 minutes"
@@ -2287,7 +2280,43 @@ for svc in supabase-db supabase-kong caddy-container; do
     docker logs "$svc" 2>&1 | tail -20 || true
   fi
 done
+${enableAuthelia ? `
+# ── Pre-register TOTP for Authelia (no email/SMTP required) ──────────────────
+# Authelia requires identity verification (email OTC) before registering a
+# TOTP device from the portal. Since we have no SMTP, we use the Authelia CLI
+# to register the TOTP secret directly in the database during deployment.
+# The user adds this secret to their authenticator app from the credentials file.
+echo "Waiting for Authelia to be ready..."
+for i in $(seq 1 24); do
+  if docker exec authelia authelia storage user list >/dev/null 2>&1; then
+    echo "Authelia storage is ready."
+    break
+  fi
+  echo "  attempt $i/24 — waiting 5s..."
+  sleep 5
+done
 
+TOTP_URI=$(docker exec authelia authelia storage user totp generate "${supabaseUser}" 2>&1 | grep -oP 'otpauth://[^\\s]+' || true)
+if [ -n "$TOTP_URI" ]; then
+  CREDS_FILE="/home/${deployUser}/supabase-credentials.txt"
+  cat >> "$CREDS_FILE" <<CREDSEOF
+
+# ── Authelia 2FA (TOTP) ──────────────────────────────────────────────────────
+# Import this URI into any authenticator app (Google Authenticator, Authy,
+# 1Password, etc.) by scanning the QR code at https://qr.is/otpauth or
+# by adding the account manually using the secret key below.
+TOTP_URI=$TOTP_URI
+TOTP_SECRET=$(echo "$TOTP_URI" | grep -oP 'secret=\\K[^&]+' || echo "see URI above")
+# ─────────────────────────────────────────────────────────────────────────────
+CREDSEOF
+  chmod 600 "$CREDS_FILE"
+  chown "${deployUser}:${deployUser}" "$CREDS_FILE"
+  echo "TOTP pre-registered. Secret saved to $CREDS_FILE"
+else
+  echo "WARNING: Could not pre-register TOTP. You can register manually after deployment:"
+  echo "  docker exec authelia authelia storage user totp generate ${supabaseUser}"
+fi
+` : ''}
 update_status "supabase_done"
 
 # ═══════════════════════════════════════════════════════════════════════════════

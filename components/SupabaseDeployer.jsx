@@ -1127,6 +1127,25 @@ export default function SupabaseDeployer() {
                 6. Management panel: <strong style={{ color: C.green }}>{config.domain}/admin/</strong><br />
                 7. Backups run automatically to your Storage Box (daily 3 AM)
               </div>
+              {config.enableAuthelia && (
+                <Card style={{ background: "#0c1219", borderColor: "#1a2f4a", color: "#93c5fd", fontSize: 12, lineHeight: 1.8, padding: "14px 16px", marginTop: 14 }}>
+                  <strong>Authenticator App Setup (2FA)</strong><br />
+                  Your TOTP secret was pre-registered during deployment — no email needed. To add it to your authenticator app:<br />
+                  <div style={{ margin: "8px 0 4px" }}>
+                    1. SSH into your server:<br />
+                    <code style={{ background: "#0a0f18", padding: "3px 7px", borderRadius: 3, display: "inline-block", marginTop: 2 }}>
+                      {`ssh -i ~/.ssh/${config.serverName} ${config.deployUser}@${serverIp}`}
+                    </code>
+                  </div>
+                  <div style={{ margin: "4px 0" }}>
+                    2. Get your TOTP secret:<br />
+                    <code style={{ background: "#0a0f18", padding: "3px 7px", borderRadius: 3, display: "inline-block", marginTop: 2 }}>
+                      cat ~/supabase-credentials.txt
+                    </code>
+                  </div>
+                  3. Copy the <code style={{ background: "#0a0f18", padding: "1px 5px", borderRadius: 3 }}>TOTP_URI</code> and import it into Google Authenticator, Authy, or 1Password — or manually enter the <code style={{ background: "#0a0f18", padding: "1px 5px", borderRadius: 3 }}>TOTP_SECRET</code> key.
+                </Card>
+              )}
             </FadeIn>
           )}
         </div>
