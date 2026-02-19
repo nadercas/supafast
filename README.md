@@ -1,8 +1,30 @@
-# Supabase Deploy
+# SupaFast
 
 **Zero-knowledge deployment tool for self-hosted Supabase on Hetzner Cloud.**
 
 Deploy a production-hardened Supabase instance in ~10 minutes. All secrets are generated in your browser using Web Crypto API and never transmitted to any server.
+
+---
+
+## Why I Built This
+
+I spent weeks trying to self-host Supabase securely. The official docs are great for getting started, but they don't cover production hardening: SSH lockdown, automated backups, fail2ban, swap configuration, kernel tuning, SSL certificates, 2FA... the list goes on.
+
+Every tutorial I found was either too basic (just `docker compose up`) or assumed I already knew how to secure a production server. I wanted something that **just worked** — a tool that would provision a hardened, production-ready Supabase instance with one click, without me having to SSH in and manually configure 50 different things.
+
+So I built SupaFast. It's the tool I wish existed when I started.
+
+Now you can deploy a **fully secured, managed Supabase instance** on Hetzner Cloud with:
+- Zero manual server configuration
+- All secrets generated client-side (zero-knowledge architecture)
+- Automatic security hardening (SSH lockdown, UFW, fail2ban, kernel tuning)
+- Built-in 2FA with Authelia (optional)
+- Encrypted daily backups to AWS S3
+- Web-based management panel (restart containers, update images, view logs)
+- Auto-HTTPS with Let's Encrypt via Caddy
+- Full Claude MCP integration (37 tools for managing your Supabase via AI)
+
+It's basically a **managed Supabase solution**, but you own the infrastructure.
 
 ---
 
