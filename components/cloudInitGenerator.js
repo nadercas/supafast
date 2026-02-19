@@ -1079,13 +1079,13 @@ MAILER_URLPATHS_EMAIL_CHANGE="/auth/v1/verify"
 
 ## Email auth
 ENABLE_EMAIL_SIGNUP=true
-ENABLE_EMAIL_AUTOCONFIRM=true
-SMTP_ADMIN_EMAIL=admin@example.com
-SMTP_HOST=supabase-mail
-SMTP_PORT=2500
-SMTP_USER=fake_mail_user
-SMTP_PASS=fake_mail_password
-SMTP_SENDER_NAME=fake_sender
+ENABLE_EMAIL_AUTOCONFIRM=${smtpHost ? 'false' : 'true'}
+SMTP_ADMIN_EMAIL=${smtpAdminEmail || supabaseEmail}
+SMTP_HOST=${smtpHost || ''}
+SMTP_PORT=${smtpPort || '587'}
+SMTP_USER=${smtpUser || ''}
+SMTP_PASS=${smtpPass || ''}
+SMTP_SENDER_NAME=${smtpSenderName || serverName}
 ENABLE_ANONYMOUS_USERS=false
 
 ## Phone auth
@@ -1889,6 +1889,7 @@ export async function generateCloudInit(config, secrets) {
     supabaseEmail, displayName, enableAuthelia, enableRedis,
     s3Bucket, s3Region, s3AccessKey, s3SecretKey,
     healthcheckUrl,
+    smtpHost, smtpPort, smtpUser, smtpPass, smtpSenderName, smtpAdminEmail,
   } = config;
 
   // Build tarball of static config files

@@ -389,6 +389,12 @@ export default function SupabaseDeployer() {
     s3AccessKey: "",
     s3SecretKey: "",
     healthcheckUrl: "",
+    smtpHost: "",
+    smtpPort: "587",
+    smtpUser: "",
+    smtpPass: "",
+    smtpSenderName: "",
+    smtpAdminEmail: "",
   });
 
   const [secrets, setSecrets] = useState(null);
@@ -610,6 +616,11 @@ export default function SupabaseDeployer() {
       `RESTIC_PASSWORD=${secrets.resticPassword}`,
       `S3_BUCKET=${config.s3Bucket}`,
       `S3_REGION=${config.s3Region}`,
+      ``,
+      `## SMTP`,
+      `SMTP_HOST=${config.smtpHost || "(not configured)"}`,
+      `SMTP_USER=${config.smtpUser}`,
+      `SMTP_PASS=${config.smtpPass}`,
       ``,
       `## Authelia`,
       `Username: ${config.supabaseUser}`,
@@ -901,6 +912,24 @@ export default function SupabaseDeployer() {
                 placeholder="https://hc-ping.com/your-uuid"
                 hint="healthchecks.io, ntfy.sh, or similar — pinged after each backup"
               />
+
+              <SectionLabel>SMTP (Transactional Email)</SectionLabel>
+              <Card style={{ background: "#0c0f1a", borderColor: "#1a2040", color: "#93c5fd", fontSize: 12, lineHeight: 1.7, padding: "12px 16px", marginBottom: 14 }}>
+                <strong>Required for auth emails</strong> — password resets, magic links, invite emails.
+                Skip now and emails won&apos;t send (users auto-confirmed). Recommended: <strong>Resend</strong> (free 3k/mo) — use <code style={{ background: "#1a2040", padding: "1px 5px", borderRadius: 3 }}>smtp.resend.com</code> port 587, username <code style={{ background: "#1a2040", padding: "1px 5px", borderRadius: 3 }}>resend</code>, password = your API key.
+              </Card>
+              <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: 12 }}>
+                <Field label="SMTP Host" value={config.smtpHost} onChange={(v) => update("smtpHost", v)} placeholder="smtp.resend.com" />
+                <Field label="SMTP Port" value={config.smtpPort} onChange={(v) => update("smtpPort", v)} placeholder="587" />
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                <Field label="SMTP Username" value={config.smtpUser} onChange={(v) => update("smtpUser", v)} placeholder="resend" />
+                <Field label="SMTP Password / API Key" type="password" value={config.smtpPass} onChange={(v) => update("smtpPass", v)} placeholder="re_..." />
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                <Field label="Sender Name" value={config.smtpSenderName} onChange={(v) => update("smtpSenderName", v)} placeholder="My App" />
+                <Field label="Admin Email" value={config.smtpAdminEmail} onChange={(v) => update("smtpAdminEmail", v)} placeholder="no-reply@yourdomain.com" />
+              </div>
             </FadeIn>
           )}
 
@@ -918,6 +947,7 @@ export default function SupabaseDeployer() {
                   ["Auth", config.enableAuthelia ? `Authelia 2FA (user: ${config.supabaseUser})` : `Basic Auth (user: ${config.supabaseUser})`],
                   ["Redis", config.enableRedis ? "Enabled (session store)" : "Disabled"],
                   ["Backups", `Restic → S3 (${config.s3Bucket} in ${config.s3Region}), daily 3 AM, encrypted`],
+                  ["SMTP", config.smtpHost ? `${config.smtpHost}:${config.smtpPort} (${config.smtpSenderName || config.smtpUser})` : "Not configured — email auto-confirm enabled"],
                   ["SSH Access", `User: ${config.deployUser} (root login disabled, key generated in browser)`],
                   ["Management", `${config.domain}/admin/ (protected by ${config.enableAuthelia ? 'Authelia' : 'Basic Auth'})`],
                   ["Hardening", "SSH hardening + UFW + fail2ban + sysctl + auto-updates + Docker security"],
