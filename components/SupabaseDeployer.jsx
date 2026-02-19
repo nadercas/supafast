@@ -395,6 +395,8 @@ export default function SupabaseDeployer() {
     smtpPass: "",
     smtpSenderName: "",
     smtpAdminEmail: "",
+    siteUrl: "",
+    additionalRedirectUrls: "",
   });
 
   const [secrets, setSecrets] = useState(null);
@@ -836,10 +838,18 @@ export default function SupabaseDeployer() {
               </div>
 
               <SectionLabel>Supabase Credentials</SectionLabel>
-              <Field label="Domain (must start with https://)" value={config.domain} onChange={(v) => update("domain", v)}
+              <Field label="Supabase API Domain (must start with https://)" value={config.domain} onChange={(v) => update("domain", v)}
                 placeholder="https://supabase.yourdomain.com"
                 hint="Point your DNS A record to the server IP after deployment"
                 error={config.domain.length > 0 && !config.domain.startsWith("https://") ? "Must start with https://" : null}
+              />
+              <Field label="Frontend App URL (optional)" value={config.siteUrl} onChange={(v) => update("siteUrl", v)}
+                placeholder="https://yourapp.com"
+                hint="Where email confirmation links redirect to. Defaults to your Supabase domain if left blank."
+              />
+              <Field label="Additional Redirect URLs (optional)" value={config.additionalRedirectUrls} onChange={(v) => update("additionalRedirectUrls", v)}
+                placeholder="https://yourapp.com,http://localhost:3000"
+                hint="Comma-separated list of allowed redirect URLs for auth callbacks"
               />
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
                 <Field label="Username" value={config.supabaseUser} onChange={(v) => update("supabaseUser", v)} placeholder="admin" />

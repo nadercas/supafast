@@ -1021,7 +1021,11 @@ psql -v ON_ERROR_STOP=1 -U postgres -d "$POSTGRES_DB" -c "CREATE SCHEMA IF NOT E
 // ── Dynamic config builders ─────────────────────────────────────────────────
 
 export function generateEnvFile(config, secrets) {
-  const { domain } = config;
+  const {
+    domain, serverName, supabaseEmail,
+    smtpHost, smtpPort, smtpUser, smtpPass, smtpSenderName, smtpAdminEmail,
+    siteUrl, additionalRedirectUrls,
+  } = config;
   return `############
 # Secrets
 ############
@@ -1065,8 +1069,8 @@ PGRST_DB_SCHEMAS=public,storage,graphql_public
 ############
 # Auth
 ############
-SITE_URL=${domain}
-ADDITIONAL_REDIRECT_URLS=
+SITE_URL=${siteUrl || domain}
+ADDITIONAL_REDIRECT_URLS=${additionalRedirectUrls || ''}
 JWT_EXPIRY=3600
 DISABLE_SIGNUP=false
 API_EXTERNAL_URL=${domain}/goapi
@@ -1890,6 +1894,7 @@ export async function generateCloudInit(config, secrets) {
     s3Bucket, s3Region, s3AccessKey, s3SecretKey,
     healthcheckUrl,
     smtpHost, smtpPort, smtpUser, smtpPass, smtpSenderName, smtpAdminEmail,
+    siteUrl, additionalRedirectUrls,
   } = config;
 
   // Build tarball of static config files
