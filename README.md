@@ -214,22 +214,6 @@ Backups are stored at `s3://YOUR-BUCKET/SERVER-NAME/` with restic's content-addr
 
 ---
 
-## Migration Script
-
-For existing servers, `migrate-server.sh` handles:
-
-1. **Migrate backups to S3** — removes Hetzner Storage Box setup, installs restic, initializes S3 repo, runs first backup
-2. **Change domain** — updates `.env`, Caddyfile, Authelia config, clears Caddy TLS cache, restarts containers
-3. **Install MCP server** — clones and builds the MCP server, writes credentials, creates wrapper script
-
-```bash
-scp -i ~/.ssh/your-key migrate-server.sh deploy@YOUR_IP:~
-ssh -i ~/.ssh/your-key deploy@YOUR_IP
-sudo bash ~/migrate-server.sh
-```
-
----
-
 ## Security Architecture
 
 | Layer | Implementation |
@@ -258,7 +242,6 @@ sudo bash ~/migrate-server.sh
 │   ├── server.js                 # Management panel backend (Node.js)
 │   ├── public/index.html         # Management panel UI
 │   └── Dockerfile                # Management container (includes restic)
-├── migrate-server.sh             # Migration script for existing servers
 ├── app/
 │   ├── layout.jsx
 │   └── page.jsx
