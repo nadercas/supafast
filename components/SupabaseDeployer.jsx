@@ -301,9 +301,10 @@ class HetznerClient {
       pulling: { label: "docker compose pull (downloading images)...", pct: 78 },
       starting_containers: { label: "docker compose up -d...", pct: 86 },
       supabase_done: { label: "Supabase is running ✓", pct: 90, type: "success" },
-      storage_box: { label: "Connecting to Storage Box...", pct: 91 },
+      s3_backup: { label: "Configuring S3 backup...", pct: 91 },
       backup_init: { label: "Initializing restic backup repository...", pct: 94 },
-      backup_first: { label: "Running first backup...", pct: 97 },
+      backup_first: { label: "Running first backup...", pct: 95 },
+      mcp_setup: { label: "Setting up MCP server (Claude integration)...", pct: 97 },
       complete: { label: "🎉 Deployment complete!", pct: 100, type: "success" },
       failed: { label: "Deployment failed on the server", pct: 0, type: "error" },
     };
@@ -383,10 +384,10 @@ export default function SupabaseDeployer() {
     displayName: "",
     enableAuthelia: true,
     enableRedis: true,
-    storageBoxUser: "",
-    storageBoxHost: "",
-    storageBoxPort: "23",
-    storageBoxPassword: "",
+    s3Bucket: "",
+    s3Region: "us-east-1",
+    s3AccessKey: "",
+    s3SecretKey: "",
     healthcheckUrl: "",
   });
 
@@ -575,9 +576,9 @@ export default function SupabaseDeployer() {
         config.supabasePassword.length >= 8 &&
         config.supabaseEmail.includes("@") &&
         config.displayName.length > 0 &&
-        config.storageBoxUser.length > 0 &&
-        config.storageBoxHost.length > 0 &&
-        config.storageBoxPassword.length > 0
+        config.s3Bucket.length > 0 &&
+        config.s3AccessKey.length > 0 &&
+        config.s3SecretKey.length > 0
       );
       case 3: return true;
       case 4: return status === "success";
@@ -607,11 +608,27 @@ export default function SupabaseDeployer() {
       ``,
       `## Backup`,
       `RESTIC_PASSWORD=${secrets.resticPassword}`,
-      `STORAGE_BOX=${config.storageBoxUser}@${config.storageBoxHost}`,
+      `S3_BUCKET=${config.s3Bucket}`,
+      `S3_REGION=${config.s3Region}`,
       ``,
       `## Authelia`,
       `Username: ${config.supabaseUser}`,
       `AUTHELIA_SESSION_SECRET=${secrets.autheliaSessionSecret}`,
+      ``,
+      `## Claude MCP Config (~/.claude/mcp.json)`,
+      JSON.stringify({
+        mcpServers: {
+          [`supabase-${config.serverName}`]: {
+            command: "ssh",
+            args: [
+              "-i", `~/.ssh/${config.serverName}`,
+              "-o", "StrictHostKeyChecking=accept-new",
+              `${config.deployUser}@${serverIp}`,
+              `/home/${config.deployUser}/bin/supabase-mcp`
+            ]
+          }
+        }
+      }, null, 2),
       ``,
       `## SSH Private Key`,
       sshPrivateKey || "(not available)",
@@ -669,8 +686,8 @@ export default function SupabaseDeployer() {
                 {[
                   ["🔐", "Zero Knowledge", "API keys exist only in browser memory (React state). Never stored, never transmitted to us."],
                   ["🛡️", "Hardened by Default", "SSH key-only, UFW, fail2ban, kernel sysctl, auto-updates, bcrypt-12, security headers."],
-                  ["🔄", "Encrypted Backups", "Daily AES-256 encrypted backups via restic. One Storage Box for all your servers."],
-                  ["⚡", "One Click, ~10 Min", "Server creation → OS hardening → Supabase + Caddy + Authelia + Redis → backup cron."],
+                  ["🔄", "Encrypted Backups", "Daily AES-256 encrypted backups via restic to AWS S3."],
+                  ["⚡", "One Click, ~10 Min", "Server creation → OS hardening → Supabase + Caddy + Authelia + Redis → S3 backup cron."],
                 ].map(([icon, title, desc]) => (
                   <Card key={title} style={{ display: "flex", gap: 14, padding: "14px 16px" }}>
                     <span style={{ fontSize: 20 }}>{icon}</span>
@@ -695,8 +712,8 @@ export default function SupabaseDeployer() {
                   ["What does 'zero knowledge' mean?", "Your API tokens, passwords, and secrets exist only in your browser's JavaScript memory. They're never stored in localStorage, cookies, or sent to any server. When you close the tab, everything is gone. The deployment script is sent as cloud-init user-data directly to the Hetzner API."],
                   ["Can I verify this is safe?", "Yes — this tool is open source. You can read every line of code, check the Network tab to confirm API calls only go to api.hetzner.cloud, and audit the cloud-init script. No analytics, no tracking, no backend."],
                   ["What gets deployed?", "A hardened Ubuntu 24.04 server running: Supabase (Postgres, Auth, Storage, Realtime, Functions, Studio), Caddy reverse proxy with auto-HTTPS, Authelia 2FA, Redis session store, and restic encrypted daily backups."],
-                  ["Can I deploy multiple instances?", "Yes — run this tool once per instance. Each gets its own server. When you set up a Hetzner Storage Box, all servers can back up to it with isolated encryption keys."],
-                  ["What about the Storage Box?", "The tool sets up local restic backups initially. To add off-server backups, order a Storage Box from Hetzner and run the setup-backups.sh script on your server. The backup scripts we install are already compatible."],
+                  ["Can I deploy multiple instances?", "Yes — run this tool once per instance. Each gets its own server. All servers can back up to the same S3 bucket with isolated encryption keys."],
+                  ["How do backups work?", "Encrypted daily backups via restic to your AWS S3 bucket. Each server gets its own prefix in the bucket. Restic handles deduplication, encryption, and retention automatically."],
                 ].map(([q, a], i) => (
                   <Card key={i} style={{ marginBottom: 6, padding: 0, overflow: "hidden", cursor: "pointer" }}
                     onClick={() => setExpandedFaq(expandedFaq === i ? null : i)}>
@@ -863,30 +880,22 @@ export default function SupabaseDeployer() {
                 </div>
               )}
 
-              <SectionLabel>Storage Box (Backups)</SectionLabel>
+              <SectionLabel>AWS S3 (Backups)</SectionLabel>
               <Card style={{ background: "#0c1a14", borderColor: "#1a3a28", color: "#6ee7b7", fontSize: 12, lineHeight: 1.7, padding: "12px 16px", marginBottom: 14 }}>
-                <strong>One Storage Box, unlimited servers.</strong> Each deployment creates its own
-                encrypted backup folder (<code style={{ background: "#1a3a28", padding: "1px 5px", borderRadius: 3 }}>/backups/{config.serverName || "server-name"}</code>).
-                Reuse the same Storage Box credentials for every Supabase instance you deploy — backups
-                are isolated with separate encryption keys. Each server gets its own SSH key installed on
-                the Storage Box automatically (this is normal — Storage Boxes support multiple authorized keys).
+                <strong>Encrypted backups to S3.</strong> Each deployment backs up to its own
+                prefix (<code style={{ background: "#1a3a28", padding: "1px 5px", borderRadius: 3 }}>s3://your-bucket/{config.serverName || "server-name"}</code>).
+                Reuse the same bucket for multiple servers — backups are isolated by server name with separate encryption keys.
                 <div style={{ marginTop: 8, paddingTop: 8, borderTop: "1px solid #1a3a28", fontSize: 11, color: "#4ade80" }}>
-                  <strong>First time?</strong> Order at <strong>hetzner.com/storage/storage-box</strong>, enable SSH in Robot panel
-                  (port 23), and use a fresh/new Storage Box to avoid conflicts with existing data.
-                  <strong style={{ display: "block", marginTop: 4 }}>⚠️ Important:</strong> Do NOT manually add SSH keys in Robot panel —
-                  the deployment script generates and installs them automatically using your password (one-time only).
-                  <br /><strong style={{ display: "block", marginTop: 6 }}>2nd+ deployment?</strong> Enter the same Storage Box credentials — a new SSH key will be
-                  installed for this server automatically. Use a unique server name to keep backups separate.
+                  <strong>Setup:</strong> Create an S3 bucket and an IAM user with <strong>s3:PutObject, s3:GetObject, s3:ListBucket, s3:DeleteObject</strong> permissions on the bucket.
                 </div>
               </Card>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-                <Field label="Storage Box Username" value={config.storageBoxUser} onChange={(v) => update("storageBoxUser", v)} placeholder="u123456" />
-                <Field label="Storage Box Host" value={config.storageBoxHost} onChange={(v) => update("storageBoxHost", v)} placeholder="u123456.your-storagebox.de" />
+                <Field label="S3 Bucket Name" value={config.s3Bucket} onChange={(v) => update("s3Bucket", v)} placeholder="my-supabase-backups" />
+                <Field label="AWS Region" value={config.s3Region} onChange={(v) => update("s3Region", v)} placeholder="us-east-1" />
               </div>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-                <Field label="SSH Port" value={config.storageBoxPort} onChange={(v) => update("storageBoxPort", v)} placeholder="23" />
-                <Field label="Storage Box Password" type="password" value={config.storageBoxPassword} onChange={(v) => update("storageBoxPassword", v)} placeholder="From Hetzner Robot panel"
-                  hint="Needed each deployment to install this server's SSH key, then wiped" />
+                <Field label="AWS Access Key ID" value={config.s3AccessKey} onChange={(v) => update("s3AccessKey", v)} placeholder="AKIA..." />
+                <Field label="AWS Secret Access Key" type="password" value={config.s3SecretKey} onChange={(v) => update("s3SecretKey", v)} placeholder="Your secret key" />
               </div>
               <Field label="Health-check URL (optional)" value={config.healthcheckUrl} onChange={(v) => update("healthcheckUrl", v)}
                 placeholder="https://hc-ping.com/your-uuid"
@@ -908,7 +917,7 @@ export default function SupabaseDeployer() {
                   ["Proxy", "Caddy (auto-TLS via Let's Encrypt)"],
                   ["Auth", config.enableAuthelia ? `Authelia 2FA (user: ${config.supabaseUser})` : `Basic Auth (user: ${config.supabaseUser})`],
                   ["Redis", config.enableRedis ? "Enabled (session store)" : "Disabled"],
-                  ["Backups", `Restic → Storage Box (${config.storageBoxUser}@${config.storageBoxHost}), daily 3 AM, encrypted`],
+                  ["Backups", `Restic → S3 (${config.s3Bucket} in ${config.s3Region}), daily 3 AM, encrypted`],
                   ["SSH Access", `User: ${config.deployUser} (root login disabled, key generated in browser)`],
                   ["Management", `${config.domain}/admin/ (protected by ${config.enableAuthelia ? 'Authelia' : 'Basic Auth'})`],
                   ["Hardening", "SSH hardening + UFW + fail2ban + sysctl + auto-updates + Docker security"],
@@ -1081,7 +1090,7 @@ export default function SupabaseDeployer() {
                   ["Service Role Key", secrets?.serviceRoleKey],
                   ["Postgres Password", secrets?.postgresPassword],
                   ["Restic Backup Password", secrets?.resticPassword],
-                  ["Storage Box", `${config.storageBoxUser}@${config.storageBoxHost}`],
+                  ["S3 Backup Bucket", `${config.s3Bucket} (${config.s3Region})`],
                   ...(config.enableAuthelia ? [["2FA Secret (TOTP)", secrets?.totpSecret]] : []),
                 ].map(([k, v], i, arr) => (
                   <div key={k} style={{
@@ -1133,6 +1142,59 @@ export default function SupabaseDeployer() {
                 so Caddy can get its own Let&apos;s Encrypt certificate directly.
               </Card>
 
+              <SectionLabel>Claude MCP Integration</SectionLabel>
+              <Card style={{ padding: 0, overflow: "hidden", marginBottom: 14 }}>
+                <div style={{
+                  padding: "10px 16px", background: C.surfaceAlt, borderBottom: `1px solid ${C.border}`,
+                  fontSize: 12, fontWeight: 600, color: C.muted, display: "flex", justifyContent: "space-between",
+                }}>
+                  <span>Add to ~/.claude/mcp.json (or Cursor / Windsurf)</span>
+                  <button onClick={() => {
+                    const mcpJson = JSON.stringify({
+                      mcpServers: {
+                        [`supabase-${config.serverName}`]: {
+                          command: "ssh",
+                          args: [
+                            "-i", `~/.ssh/${config.serverName}`,
+                            "-o", "StrictHostKeyChecking=accept-new",
+                            `${config.deployUser}@${serverIp || "SERVER_IP"}`,
+                            `/home/${config.deployUser}/bin/supabase-mcp`
+                          ]
+                        }
+                      }
+                    }, null, 2);
+                    navigator.clipboard.writeText(mcpJson);
+                    setCopyFeedback(true); setTimeout(() => setCopyFeedback(false), 2000);
+                  }} style={{
+                    ...S.btn, padding: "2px 10px", fontSize: 10,
+                    background: copyFeedback ? C.greenDark : C.surface,
+                    color: copyFeedback ? "#000" : C.muted,
+                  }}>
+                    {copyFeedback ? "Copied ✓" : "Copy JSON"}
+                  </button>
+                </div>
+                <pre style={{
+                  padding: "12px 16px", margin: 0, fontSize: 10, color: "#93c5fd",
+                  whiteSpace: "pre-wrap", wordBreak: "break-all",
+                  fontFamily: "'JetBrains Mono', monospace", lineHeight: 1.6,
+                }}>{JSON.stringify({
+                  mcpServers: {
+                    [`supabase-${config.serverName}`]: {
+                      command: "ssh",
+                      args: [
+                        "-i", `~/.ssh/${config.serverName}`,
+                        "-o", "StrictHostKeyChecking=accept-new",
+                        `${config.deployUser}@${serverIp || "SERVER_IP"}`,
+                        `/home/${config.deployUser}/bin/supabase-mcp`
+                      ]
+                    }
+                  }
+                }, null, 2)}</pre>
+                <div style={{ padding: "8px 16px", fontSize: 11, color: C.dim, borderTop: `1px solid ${C.border}` }}>
+                  37 tools: database, auth, storage, edge functions, migrations, RLS, realtime, logs &amp; admin
+                </div>
+              </Card>
+
               <SectionLabel>Next Steps</SectionLabel>
               <div style={{ fontSize: 12, color: C.muted, lineHeight: 2, paddingLeft: 4 }}>
                 1. Save the SSH private key above to <strong style={{ color: C.text }}>~/.ssh/{config.serverName}</strong><br />
@@ -1141,7 +1203,8 @@ export default function SupabaseDeployer() {
                 4. Visit <strong style={{ color: C.green }}>{config.domain}</strong> and log in<br />
                 5. SSH: <code style={{ background: C.surfaceAlt, padding: "1px 5px", borderRadius: 3 }}>ssh -i ~/.ssh/{config.serverName} {config.deployUser}@{serverIp}</code><br />
                 6. Management panel: <strong style={{ color: C.green }}>{config.domain}/admin/</strong><br />
-                7. Backups run automatically to your Storage Box (daily 3 AM)
+                7. Backups run automatically to S3 (daily 3 AM)<br />
+                8. Copy the MCP config above into <code style={{ background: C.surfaceAlt, padding: "1px 5px", borderRadius: 3 }}>~/.claude/mcp.json</code> to connect Claude
               </div>
               {config.enableAuthelia && (
                 <Card style={{ background: "#0c1219", borderColor: "#1a2f4a", color: "#93c5fd", fontSize: 12, lineHeight: 1.8, padding: "14px 16px", marginTop: 14 }}>

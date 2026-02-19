@@ -164,9 +164,6 @@
 
   <!-- Backups -->
   <div class="panel" id="panel-backups">
-    <div class="actions">
-      <button class="btn btn-green" onclick="runBackup()">Run Backup Now</button>
-    </div>
     <div class="grid grid-4 mb-16" id="backupInfo"></div>
     <h3 class="section-title">Snapshots</h3>
     <div class="card" style="padding:0;overflow:hidden">
@@ -475,12 +472,6 @@ async function loadBackups() {
           </tr>
         `).join('');
   }
-}
-
-async function runBackup() {
-  toast('Backup triggered...', 'info');
-  const data = await api('/api/backup/run', { method: 'POST' });
-  if (data && data.success) toast('Backup started in background', 'success');
 }
 
 // --- Security ---

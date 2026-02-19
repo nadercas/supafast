@@ -1,228 +1,276 @@
-# 🚀 Supabase Deploy
+# Supabase Deploy
 
 **Zero-knowledge deployment tool for self-hosted Supabase on Hetzner Cloud.**
 
-Deploy production-ready Supabase in ~10 minutes with automated server hardening, 2FA, and encrypted backups. All secrets are generated in your browser and never leave your machine.
-
-## ✨ Features
-
-- **🔐 Zero-Knowledge Architecture** — API tokens and secrets exist only in browser memory (React state). Never stored, never transmitted to our servers.
-- **🛡️ Hardened by Default** — SSH key-only, UFW firewall, fail2ban, kernel sysctl tuning, auto-updates, bcrypt-12, security headers.
-- **🔄 Encrypted Backups** — Daily AES-256 encrypted backups via restic to Hetzner Storage Box. One Storage Box supports unlimited servers.
-- **⚡ One-Click Deploy** — Server provisioning → OS hardening → Supabase + Caddy + Authelia + Redis → backup cron. All automated via cloud-init.
-- **🔑 Browser SSH Key Generation** — Ed25519 keypairs generated client-side using Web Crypto API. No pre-existing SSH keys required.
-- **👤 Deploy User** — Creates a dedicated non-root user with sudo access. Root login is fully disabled.
-
-## 🏗️ What Gets Deployed
-
-**Server Hardening:**
-- Ubuntu 24.04 LTS
-- Non-root deploy user with SSH key-only access
-- UFW firewall (22, 80, 443) with rate limiting
-- fail2ban protection
-- Kernel hardening (sysctl)
-- Automatic security updates
-- Swap and performance tuning
-- Docker with security hardening
-
-**Supabase Stack:**
-- PostgreSQL 15
-- Auth (GoTrue)
-- Storage (with MinIO)
-- Realtime
-- Edge Functions
-- Studio
-- Kong API Gateway
-- Caddy reverse proxy (auto-HTTPS via Let's Encrypt)
-- Authelia 2FA (optional)
-- Redis session store (optional)
-
-**Backups:**
-- Restic encrypted backups
-- Hetzner Storage Box via SFTP
-- Daily automated backups (3 AM)
-- Retention: 7 daily, 4 weekly, 6 monthly
-- Health-check notifications (healthchecks.io, ntfy.sh, etc.)
-
-## 🚀 Quick Start
-
-### Prerequisites
-
-1. **Hetzner Cloud Account** — Sign up at [hetzner.com/cloud](https://www.hetzner.com/cloud)
-2. **Hetzner Cloud API Token** — Get one at console.hetzner.cloud → Security → API Tokens (Read & Write permissions)
-3. **Domain Name** — For HTTPS/TLS (point A record to server IP after deployment)
-4. **Hetzner Storage Box** (optional but recommended) — Order at [hetzner.com/storage/storage-box](https://www.hetzner.com/storage/storage-box)
-
-### Deploy
-
-1. Visit [your-deployed-url.vercel.app](#)
-2. Enter your Hetzner Cloud API token
-3. Configure your deployment:
-   - Server name (e.g., `supabase-prod`)
-   - Deploy user name (SSH login username)
-   - Location (Falkenstein, Nuremberg, Helsinki, Ashburn, Hillsboro)
-   - Server type (CX33 recommended — 4 vCPU, 8 GB RAM)
-   - Domain (must start with `https://`)
-   - Supabase credentials (username, password, email)
-   - Storage Box credentials (for encrypted backups)
-4. Review and deploy
-5. Wait ~10 minutes for deployment to complete
-6. **Save your credentials** — they only exist in browser memory!
-
-### After Deployment
-
-1. **Save SSH private key** to `~/.ssh/your-server-name`
-2. **Point DNS A record** from your domain to the server IP
-3. Wait 2-5 minutes for Caddy to provision TLS certificate
-4. Visit your domain and log in
-5. SSH access: `ssh -i ~/.ssh/your-server-name deploy-user@server-ip`
-
-## 🔒 Security
-
-### Zero-Knowledge Architecture
-
-- **All secrets generated client-side** using Web Crypto API
-- **No backend server** — all API calls go directly from your browser to api.hetzner.cloud
-- **No analytics, no tracking** — open source, auditable code
-- **Secrets never stored** in localStorage, cookies, or databases
-- **Ed25519 SSH keys** generated in browser and never leave your machine (except public key uploaded to Hetzner)
-
-### Server Hardening
-
-- **Non-root deploy user** with SSH key-only access, root login fully disabled
-- **UFW firewall** with rate limiting on SSH
-- **fail2ban** protection against brute-force attacks
-- **Kernel hardening** via sysctl (IP spoofing protection, SYN cookies, etc.)
-- **Automatic security updates** via unattended-upgrades
-- **Docker security** (no-new-privileges, user namespaces)
-- **Bcrypt-12** password hashing for Authelia
-- **Security headers** (X-Content-Type-Options, X-Frame-Options, CSP)
-
-### Backup Security
-
-- **AES-256 encryption** via restic
-- **Unique encryption key per server** — generated in browser, stored in server's backup.env
-- **SSH key authentication** for Storage Box (password used once during setup, then wiped from logs)
-- **Isolated backup folders** — `/backups/server-name` per deployment
-
-## 🛠️ Development
-
-```bash
-# Clone the repo
-git clone <your-repo-url>
-cd supabase-selfhost
-
-# Install dependencies
-npm install
-
-# Run dev server
-npm run dev
-
-# Build for production
-npm run build
-
-# Start production server
-npm start
-```
-
-## 📁 Project Structure
-
-```
-.
-├── app/
-│   ├── layout.jsx          # Next.js app layout with metadata
-│   └── page.jsx            # Main page (renders SupabaseDeployer)
-├── components/
-│   └── SupabaseDeployer.jsx # Main deployment component
-├── public/                 # Static assets
-├── package.json
-├── next.config.js
-└── README.md
-```
-
-## 🌐 Deploy to Vercel
-
-[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https://github.com/your-username/your-repo)
-
-Or manually:
-
-```bash
-# Install Vercel CLI
-npm i -g vercel
-
-# Deploy
-vercel
-```
-
-## 📚 Documentation
-
-### Storage Box Setup
-
-1. Order a Storage Box at [hetzner.com/storage/storage-box](https://www.hetzner.com/storage/storage-box)
-2. Go to Hetzner Robot panel → Storage Box → Enable SSH
-3. Note your username (e.g., `u123456`), hostname (e.g., `u123456.your-storagebox.de`), and password
-4. Enter these credentials during deployment
-
-**For 2nd+ deployments:** Reuse the same Storage Box credentials. Each server creates its own `/backups/server-name` folder with a unique encryption key and SSH key.
-
-### Manual Backup Operations
-
-SSH into your server and run:
-
-```bash
-cd /root/supabase-automated-self-host/docker
-
-# Manual backup
-./supabase-backup.sh
-
-# List snapshots
-restic -r sftp:u123456@storagebox-server-name:/backups/server-name snapshots
-
-# Restore latest backup
-# (stop Supabase first: docker compose down)
-restic -r sftp:u123456@storagebox-server-name:/backups/server-name restore latest --target /restore
-# Then copy files back manually
-
-# Check repo stats
-restic -r sftp:u123456@storagebox-server-name:/backups/server-name stats
-```
-
-### Environment Variables
-
-The deployed server's `.env` file contains:
-
-- `JWT_SECRET` — Supabase JWT secret
-- `ANON_KEY` — Public anonymous key for client SDKs
-- `SERVICE_ROLE_KEY` — Admin key (keep secret!)
-- `POSTGRES_PASSWORD` — PostgreSQL superuser password
-- `SECRET_KEY_BASE` — Auth secret key base
-- `VAULT_ENC_KEY` — Vault encryption key
-- `S3_PROTOCOL_ACCESS_KEY_ID/SECRET` — MinIO credentials
-- `AUTHELIA_SESSION_SECRET` — Authelia session encryption
-- `AUTHELIA_STORAGE_ENCRYPTION_KEY` — Authelia DB encryption
-- `AUTHELIA_IDENTITY_VALIDATION_RESET_PASSWORD_JWT_SECRET` — Authelia JWT
-
-All of these are generated in your browser and included in the credentials you save at the end.
-
-## 🤝 Contributing
-
-Contributions welcome! Please open an issue or PR.
-
-## 📄 License
-
-MIT License - see LICENSE file for details
-
-## ⚠️ Disclaimer
-
-This tool is provided as-is. Always review the generated cloud-init script and verify the security of your deployment. Keep your credentials safe and never commit them to version control.
-
-## 🙏 Credits
-
-- Built with [Next.js](https://nextjs.org/)
-- Supabase deployment based on [supabase-automated-self-host](https://github.com/singh-inder/supabase-automated-self-host)
-- Server hardening inspired by best practices from the community
-- Encrypted backups via [restic](https://restic.net/)
+Deploy a production-hardened Supabase instance in ~10 minutes. All secrets are generated in your browser using Web Crypto API and never transmitted to any server.
 
 ---
 
-Made with ❤️ for the self-hosting community
+## What Gets Deployed
+
+**Server (Ubuntu 24.04 LTS)**
+- Non-root deploy user, root login fully disabled
+- SSH key-only access (ed25519 keypair generated in browser)
+- UFW firewall (ports 22, 80, 443 only)
+- fail2ban brute-force protection
+- Kernel hardening via sysctl
+- Unattended security updates
+- Swap configured for server type
+- Docker with hardening flags
+
+**Supabase Stack**
+- PostgreSQL 15
+- Auth (GoTrue)
+- Storage
+- Realtime
+- Edge Functions (Deno runtime)
+- Supabase Studio
+- Kong API Gateway
+- Supavisor connection pooler
+- Caddy reverse proxy (auto-HTTPS via Let's Encrypt)
+- Authelia 2FA with TOTP (optional)
+- Redis session store (optional)
+
+**Backups**
+- Restic AES-256 encrypted backups to AWS S3
+- Daily cron at 3 AM
+- Retention: 7 daily, 4 weekly, 6 monthly
+- Postgres dump + config files + storage volumes
+
+**MCP Server (Claude / Cursor / Windsurf integration)**
+- Full Supabase MCP server deployed on the server
+- 37 tools across database, auth, storage, edge functions, migrations, RLS, realtime, logs, and admin
+- Accessible via SSH stdio — no extra ports, no new attack surface
+- Edge function create/update/delete implemented via direct filesystem writes (self-hosted native)
+
+---
+
+## Quick Start
+
+### Prerequisites
+
+- Hetzner Cloud account + API token (Read & Write)
+- Domain with DNS access
+- AWS S3 bucket for backups (see [S3 Setup](#s3-setup))
+
+### Deploy
+
+1. Visit the deployer UI
+2. Enter your Hetzner Cloud API token
+3. Configure:
+   - Server name, location, and type (CX33 recommended — 4 vCPU, 8 GB RAM, ~€8.49/mo)
+   - Domain (e.g. `https://api.yourdomain.com`)
+   - Supabase credentials and display name
+   - AWS S3 bucket, region, access key, secret key
+   - Optional: enable Authelia 2FA, Redis
+4. Review and deploy
+5. **Save your credentials immediately** — they exist only in browser memory
+
+### After Deployment
+
+1. Save the SSH private key to `~/.ssh/your-server-name` and `chmod 600` it
+2. Point your DNS A record to the server IP
+3. Wait 2–5 min for Caddy to provision the TLS certificate
+4. Visit your domain and log in
+5. Add the MCP config to your Claude/Cursor settings (shown in completion screen)
+
+---
+
+## Claude MCP Integration
+
+The deployer automatically installs a full Supabase MCP server on your server. At the end of deployment you'll see a ready-to-paste config block:
+
+```json
+{
+  "mcpServers": {
+    "supabase-your-server": {
+      "command": "ssh",
+      "args": [
+        "-i", "~/.ssh/your-server-name",
+        "-o", "StrictHostKeyChecking=accept-new",
+        "deploy@YOUR_SERVER_IP",
+        "/home/deploy/bin/supabase-mcp"
+      ]
+    }
+  }
+}
+```
+
+Add this to `~/.claude/mcp.json` (Claude Code), Cursor MCP settings, or Windsurf.
+
+### How It Works
+
+The MCP server uses SSH stdio transport — no HTTP server, no new open ports. When your MCP client starts:
+
+1. Your local machine spawns an SSH process authenticated with your private key
+2. SSH connects to your server as the deploy user
+3. The server runs `/home/deploy/bin/supabase-mcp` — a wrapper that sources credentials and launches the MCP server
+4. All MCP communication flows through the SSH stdio pipe
+5. The MCP server connects to Supabase (service role key) and PostgreSQL directly on the server
+
+```
+Claude Code (local) ──── SSH stdio ──── MCP server (on your server)
+                                              │
+                                     ┌────────┴────────┐
+                                     │                 │
+                              Supabase SDK          pg client
+                            (REST + Realtime)    (direct postgres)
+```
+
+**Security model:**
+- Authentication = your SSH private key. No key = no access, period.
+- Server has `PasswordAuthentication no` — brute force impossible
+- Supabase credentials (service role key, JWT secret, DB password) live in `/home/deploy/.mcp.env` (chmod 600, deploy user only)
+- They never appear in your local MCP config
+- `StrictHostKeyChecking=accept-new` — accepts on first connect, rejects if host key ever changes (MITM protection)
+
+### Available Tools (37 total)
+
+| Category | Tools |
+|---|---|
+| **Database** | query, insert, update, delete, describe table, list tables |
+| **Auth** | list users, create user, delete user, update user, get user, list sessions |
+| **Storage** | list buckets, create bucket, delete bucket, list files, upload file, delete file |
+| **Edge Functions** | create/update, list, delete, invoke |
+| **Migrations** | create, list, apply, rollback, status |
+| **RLS** | list policies, create policy, delete policy, enable RLS, disable RLS |
+| **Realtime** | list channels, list publications, manage subscriptions |
+| **Logs** | query postgres logs, query auth logs, query edge function logs |
+| **Admin** | health check, get config, restart services, get stats, get version |
+
+### Edge Functions via MCP
+
+Unlike the hosted Supabase platform (which requires the CLI), our MCP server deploys edge functions directly to the filesystem. The Supabase Edge Runtime hot-reloads on file changes — functions are live immediately:
+
+```
+Claude → MCP create_edge_function → writes to /root/supabase/docker/volumes/functions/name/index.ts
+                                                                    ↓
+                                              Edge Runtime detects change → function is live
+```
+
+### MCP Server Fork
+
+The MCP server is based on [mcp-supabase-self-hosted](https://github.com/ninedotdev/mcp-supabase-self-hosted) by **ninedotdev** — full credit for the original 37-tool implementation. Our fork ([nadercas/supafast-mcp](https://github.com/nadercas/supafast-mcp)) adds:
+
+- Filesystem-based edge function CRUD (replaces "not supported" errors)
+- Dependency overrides to patch all known vulnerabilities in transitive deps
+- Updated `@modelcontextprotocol/sdk` to `^1.0.0`
+- `npm prune --omit=dev` baked in — clean production install
+
+---
+
+## S3 Setup
+
+1. Create an S3 bucket in AWS (any region)
+   - Block all public access: ON
+   - Versioning: disabled (restic manages its own)
+   - Server-side encryption: SSE-S3
+2. Create an IAM user with programmatic access and attach this policy:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Action": [
+      "s3:PutObject",
+      "s3:GetObject",
+      "s3:DeleteObject",
+      "s3:ListBucket"
+    ],
+    "Resource": [
+      "arn:aws:s3:::YOUR-BUCKET-NAME",
+      "arn:aws:s3:::YOUR-BUCKET-NAME/*"
+    ]
+  }]
+}
+```
+
+3. Save the Access Key ID and Secret Access Key for the deployer
+
+Backups are stored at `s3://YOUR-BUCKET/SERVER-NAME/` with restic's content-addressed, AES-256 encrypted format.
+
+---
+
+## Migration Script
+
+For existing servers, `migrate-server.sh` handles:
+
+1. **Migrate backups to S3** — removes Hetzner Storage Box setup, installs restic, initializes S3 repo, runs first backup
+2. **Change domain** — updates `.env`, Caddyfile, Authelia config, clears Caddy TLS cache, restarts containers
+3. **Install MCP server** — clones and builds the MCP server, writes credentials, creates wrapper script
+
+```bash
+scp -i ~/.ssh/your-key migrate-server.sh deploy@YOUR_IP:~
+ssh -i ~/.ssh/your-key deploy@YOUR_IP
+sudo bash ~/migrate-server.sh
+```
+
+---
+
+## Security Architecture
+
+| Layer | Implementation |
+|---|---|
+| SSH access | ed25519 key only, password auth disabled, root login disabled |
+| Firewall | UFW: ports 22, 80, 443 only |
+| Brute force | fail2ban on SSH |
+| Kernel | sysctl hardening (IP spoofing, SYN cookies, ICMP, etc.) |
+| Passwords | bcrypt cost 12 via Authelia |
+| 2FA | TOTP pre-registered at deploy time (no setup required post-deploy) |
+| HTTPS | Caddy auto-HTTPS via Let's Encrypt |
+| Backups | restic AES-256, unique key per server, stored in S3 |
+| MCP creds | chmod 600, deploy user only, never in local config |
+| Secrets | Generated in browser via Web Crypto API, never sent to any server |
+
+---
+
+## Project Structure
+
+```
+.
+├── components/
+│   ├── SupabaseDeployer.jsx      # Main deployment wizard UI
+│   └── cloudInitGenerator.js    # Generates the cloud-init bash script
+├── management/
+│   ├── server.js                 # Management panel backend (Node.js)
+│   ├── public/index.html         # Management panel UI
+│   └── Dockerfile                # Management container (includes restic)
+├── migrate-server.sh             # Migration script for existing servers
+├── app/
+│   ├── layout.jsx
+│   └── page.jsx
+└── README.md
+```
+
+**The cloud-init script (generated at deploy time) handles:**
+- Phase 1: OS hardening (packages, user, SSH, kernel, swap, firewall, Docker)
+- Phase 2: Supabase stack (config files, docker-compose, Caddy, Authelia, pull + start)
+- Phase 3: S3 backup (restic install, repo init, backup script, cron)
+- Phase 4: MCP server (Node.js, clone fork, build, env file, wrapper script)
+
+---
+
+## Self-Hosted Supabase Notes
+
+Some Supabase Studio features call the Supabase Cloud Management API and will not work on self-hosted:
+
+- **Publishable keys** — use your anon key instead
+- **API key management UI** — manage keys directly in `/root/supabase/docker/.env`
+- **JWT secret rotation UI** — update `JWT_SECRET` in `.env` and restart containers
+
+Everything else — Studio, SQL editor, Auth, Storage, Edge Functions, Realtime — works fully.
+
+---
+
+## Credits
+
+- **[supabase-automated-self-host](https://github.com/singh-inder/supabase-automated-self-host)** by singh-inder — foundation for the Supabase docker-compose configuration
+- **[mcp-supabase-self-hosted](https://github.com/ninedotdev/mcp-supabase-self-hosted)** by ninedotdev — original 37-tool MCP server implementation that made full Supabase MCP integration possible
+- **[restic](https://restic.net/)** — encrypted backup engine
+- **[Caddy](https://caddyserver.com/)** — automatic HTTPS
+- **[Authelia](https://www.authelia.com/)** — 2FA / SSO
+
+---
+
+MIT License

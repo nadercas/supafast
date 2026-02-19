@@ -404,13 +404,6 @@ async function handleBackupSnapshots(req, res) {
   }
 }
 
-async function handleBackupRun(req, res) {
-  sendJson(res, { success: true, message: 'Backup triggered' });
-  exec('bash /app/scripts/backup.sh >> /host-logs/backup.log 2>&1', {
-    env: { ...process.env },
-  }, () => {});
-}
-
 async function handleBackupStatus(req, res) {
   const logPath = path.join(HOST_LOGS, 'backup.log');
   const log = readFile(logPath);
@@ -584,9 +577,6 @@ const server = http.createServer(async (req, res) => {
     // Backup routes
     if (urlPath === '/api/backup/snapshots' && method === 'GET') {
       return handleBackupSnapshots(req, res);
-    }
-    if (urlPath === '/api/backup/run' && method === 'POST') {
-      return handleBackupRun(req, res);
     }
     if (urlPath === '/api/backup/status' && method === 'GET') {
       return handleBackupStatus(req, res);

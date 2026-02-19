@@ -303,7 +303,7 @@ services:
   ## Block access to /api/mcp
   - name: mcp-blocker
     _comment: 'Block direct access to /api/mcp'
-    url: http://studio:3000/api/mcp
+    url: http://supabase-studio:3000/api/mcp
     routes:
       - name: mcp-blocker-route
         strip_path: true
@@ -317,8 +317,8 @@ services:
 
   ## MCP endpoint - local access
   - name: mcp
-    _comment: 'MCP: /mcp -> http://studio:3000/api/mcp (local access)'
-    url: http://studio:3000/api/mcp
+    _comment: 'MCP: /mcp -> http://supabase-studio:3000/api/mcp (local access)'
+    url: http://supabase-studio:3000/api/mcp
     routes:
       - name: mcp
         strip_path: true
@@ -332,8 +332,8 @@ services:
 
   ## Protected Dashboard - catch all remaining routes
   - name: dashboard
-    _comment: 'Studio: /* -> http://studio:3000/*'
-    url: http://studio:3000/
+    _comment: 'Studio: /* -> http://supabase-studio:3000/*'
+    url: http://supabase-studio:3000/
     routes:
       - name: dashboard-all
         strip_path: true
@@ -1130,6 +1130,13 @@ MINIO_ROOT_PASSWORD=${secrets.minioRootPassword}
 # Server
 ############
 SERVER_NAME=${config.serverName}
+
+############
+# Backups (S3)
+############
+RESTIC_REPOSITORY=s3:s3.${config.s3Region}.amazonaws.com/${config.s3Bucket}/${config.serverName}
+AWS_ACCESS_KEY_ID=${config.s3AccessKey}
+AWS_SECRET_ACCESS_KEY=${config.s3SecretKey}
 `;
 }
 
@@ -1140,7 +1147,7 @@ export function generateDockerCompose(config) {
   let compose = `name: supabase
 
 services:
-  studio:
+  supabase-studio:
     container_name: supabase-studio
     image: supabase/studio:2026.01.27-sha-6aa59ff
     restart: unless-stopped
@@ -1150,7 +1157,7 @@ services:
           "CMD",
           "node",
           "-e",
-          "fetch('http://studio:3000/api/platform/profile').then((r) => {if (r.status !== 200) throw new Error(r.status)})"
+          "fetch('http://supabase-studio:3000/api/platform/profile').then((r) => {if (r.status !== 200) throw new Error(r.status)})"
         ]
       timeout: 10s
       interval: 5s
@@ -1623,8 +1630,6 @@ services:
       - /var/log:/host-logs:ro
       - ./backup.env:/app/backup.env:ro
       - .:/supabase:ro
-      - ./scripts:/app/scripts:ro
-      - \${RESTIC_REPOSITORY:-/backups}:/backup
     expose:
       - "3001"
     depends_on:
@@ -1637,8 +1642,10 @@ services:
       DOCKER_HOST: tcp://docker-socket-proxy:2375
       SUPABASE_DIR: /supabase
       SERVER_NAME: \${SERVER_NAME}
-      RESTIC_REPOSITORY: /backup
-      RESTIC_PASSWORD: \${RESTIC_PASSWORD}`;
+      RESTIC_REPOSITORY: \${RESTIC_REPOSITORY}
+      RESTIC_PASSWORD: \${RESTIC_PASSWORD}
+      AWS_ACCESS_KEY_ID: \${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: \${AWS_SECRET_ACCESS_KEY}`;
 
   // Conditional: Authelia
   if (enableAuthelia) {
@@ -1851,7 +1858,7 @@ ${enableAuthelia ? `    forward_auth authelia:9091 {
     }` : `    basic_auth {
       {$PROXY_AUTH_USERNAME} {$PROXY_AUTH_PASSWORD}
     }`}
-    reverse_proxy studio:3000
+    reverse_proxy supabase-studio:3000
   }
 
   header -server
@@ -1880,7 +1887,7 @@ export async function generateCloudInit(config, secrets) {
   const {
     serverName, deployUser, domain, supabaseUser, supabasePassword,
     supabaseEmail, displayName, enableAuthelia, enableRedis,
-    storageBoxUser, storageBoxHost, storageBoxPort, storageBoxPassword,
+    s3Bucket, s3Region, s3AccessKey, s3SecretKey,
     healthcheckUrl,
   } = config;
 
@@ -1974,7 +1981,7 @@ apt-get install -y -qq \\
   unattended-upgrades apt-listchanges \\
   net-tools htop sysstat apparmor apparmor-utils \\
   libpam-pwquality apt-transport-https ca-certificates gnupg lsb-release \\
-  apache2-utils sshpass
+  apache2-utils
 
 update_status "packages_done"
 
@@ -2281,77 +2288,38 @@ for svc in supabase-db supabase-kong caddy-container; do
   fi
 done
 ${enableAuthelia ? `
-# ── Register pre-generated TOTP secret in Authelia DB ────────────────────────
-# The TOTP secret was generated in the browser and shown in the deployer
-# credentials page. We insert it directly into Postgres so Authelia recognises
-# it immediately — no email, no SMTP, no portal interaction needed.
-echo "Registering TOTP secret in Authelia database..."
+# ── Register pre-generated TOTP secret via Authelia CLI ──────────────────────
+# IMPORTANT: Authelia encrypts TOTP secrets with AUTHELIA_STORAGE_ENCRYPTION_KEY
+# before storing them. A raw psql INSERT bypasses this and produces an
+# unreadable row. The CLI handles encryption automatically.
+echo "Registering TOTP secret via Authelia CLI..."
 for i in $(seq 1 24); do
-  if docker exec supabase-db pg_isready -U postgres -q 2>/dev/null; then
-    echo "Postgres is ready."
+  if docker exec authelia authelia storage user list >/dev/null 2>&1; then
+    echo "Authelia storage is ready."
     break
   fi
   echo "  attempt $i/24 — waiting 5s..."
   sleep 5
 done
 
-# Decode base32 secret to hex, then insert into Authelia's totp_configurations
-TOTP_HEX=$(python3 -c "
-import base64, sys
-s = '${secrets.totpSecret}'
-pad = (8 - len(s) % 8) % 8
-sys.stdout.write(base64.b32decode(s + '=' * pad, casefold=True).hex())
-" 2>/dev/null)
-
-if [ -n "$TOTP_HEX" ]; then
-  docker exec supabase-db psql -U postgres -d postgres -c "
-    INSERT INTO authelia.totp_configurations
-      (username, issuer, algorithm, digits, period, secret)
-    VALUES
-      ('${supabaseUser}', '${config.domain.replace(/^https?:\/\//, '')}', 'SHA1', 6, 30, decode('$TOTP_HEX', 'hex'))
-    ON CONFLICT (username) DO NOTHING;
-  " && echo "TOTP registered successfully." || echo "WARNING: TOTP insert failed."
-else
-  echo "WARNING: Could not decode TOTP secret."
-fi
+docker exec authelia authelia storage user totp generate "${supabaseUser}" \
+  --secret "${secrets.totpSecret}" \
+  --issuer "${host}" \
+  --algorithm SHA1 \
+  --digits 6 \
+  --period 30 \
+  && echo "TOTP registered successfully." \
+  || echo "WARNING: Could not pre-register TOTP. Run manually: docker exec authelia authelia storage user totp generate ${supabaseUser} --secret ${secrets.totpSecret}"
 ` : ''}
 update_status "supabase_done"
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# PHASE 3: STORAGE BOX + BACKUP SETUP
+# PHASE 3: S3 BACKUP SETUP
 # ═══════════════════════════════════════════════════════════════════════════════
 set +e
-update_status "storage_box"
+update_status "s3_backup"
 
-SB_USER="${storageBoxUser}"
-SB_HOST="${storageBoxHost}"
-SB_PORT="${storageBoxPort}"
-SB_ALIAS="storagebox-${serverName}"
-SB_KEY="/root/.ssh/storagebox_${serverName}"
-SB_CONNECTED=false
-
-# Generate SSH key for Storage Box
-mkdir -p /root/.ssh
-chmod 700 /root/.ssh
-ssh-keygen -t ed25519 -f "$SB_KEY" -N "" -C "backup-${serverName}-$(hostname)"
-
-# Install SSH key on Hetzner Storage Box
-if timeout 30 sshpass -p '${storageBoxPassword.replace(/'/g, "'\\''")}' ssh -p "$SB_PORT" \\
-  -o StrictHostKeyChecking=accept-new \\
-  -o ConnectTimeout=10 \\
-  "$SB_USER@$SB_HOST" install-ssh-key < "$SB_KEY.pub" 2>&1; then
-  cat >> /root/.ssh/config <<SSHCFG
-
-Host $SB_ALIAS
-    HostName $SB_HOST
-    User $SB_USER
-    Port $SB_PORT
-    IdentityFile $SB_KEY
-    StrictHostKeyChecking accept-new
-SSHCFG
-  chmod 600 /root/.ssh/config
-  SB_CONNECTED=true
-fi
+S3_REPO="s3:s3.${s3Region}.amazonaws.com/${s3Bucket}/${serverName}"
 
 update_status "backup_init"
 apt-get install -y -qq restic
@@ -2364,6 +2332,8 @@ SCRIPT_DIR="$(cd "$(dirname "\${BASH_SOURCE[0]}")" && pwd)"
 source "\${SCRIPT_DIR}/backup.env"
 export RESTIC_PASSWORD
 export RESTIC_REPOSITORY
+export AWS_ACCESS_KEY_ID
+export AWS_SECRET_ACCESS_KEY
 
 STAGING=$(mktemp -d /tmp/supabase-backup.XXXXXX)
 trap 'rm -rf "$STAGING"' EXIT
@@ -2412,20 +2382,15 @@ BACKUPSCRIPT
 chmod +x /root/supabase/docker/supabase-backup.sh
 
 # Write backup config
-if [ "$SB_CONNECTED" = true ]; then
-  REPO="sftp:$SB_USER@$SB_ALIAS:/backups/${serverName}"
-else
-  mkdir -p "/root/backups/${serverName}"
-  REPO="/root/backups/${serverName}"
-fi
-
 cat > /root/supabase/docker/backup.env <<BENV
 SERVER_NAME="${serverName}"
 RESTIC_PASSWORD="${secrets.resticPassword}"
 SUPABASE_DOCKER_DIR="/root/supabase/docker"
 POSTGRES_CONTAINER="supabase-db"
 POSTGRES_USER="postgres"
-RESTIC_REPOSITORY="$REPO"
+RESTIC_REPOSITORY="$S3_REPO"
+AWS_ACCESS_KEY_ID="${s3AccessKey}"
+AWS_SECRET_ACCESS_KEY="${s3SecretKey}"
 RETENTION_DAILY=7
 RETENTION_WEEKLY=4
 RETENTION_MONTHLY=6
@@ -2433,9 +2398,11 @@ HEALTHCHECK_URL="${healthcheckUrl || ''}"
 BENV
 chmod 600 /root/supabase/docker/backup.env
 
-# Init restic repo
+# Init restic repo (S3)
 export RESTIC_PASSWORD="${secrets.resticPassword}"
-export RESTIC_REPOSITORY="$REPO"
+export RESTIC_REPOSITORY="$S3_REPO"
+export AWS_ACCESS_KEY_ID="${s3AccessKey}"
+export AWS_SECRET_ACCESS_KEY="${s3SecretKey}"
 restic init || true
 
 # First backup
@@ -2458,6 +2425,54 @@ $LOG {
     create 640 root root
 }
 LOGROT
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PHASE 4: MCP SERVER SETUP
+# ═══════════════════════════════════════════════════════════════════════════════
+update_status "mcp_setup"
+
+# Install Node.js 20 if not already present
+if ! command -v node &>/dev/null; then
+  curl -fsSL https://deb.nodesource.com/setup_20.x | bash - >/dev/null 2>&1
+  apt-get install -y -qq nodejs
+fi
+
+MCP_DIR="/home/${deployUser}/mcp-server"
+rm -rf "$MCP_DIR"
+git clone --depth 1 https://github.com/nadercas/supafast-mcp.git "$MCP_DIR" >/dev/null 2>&1
+
+cd "$MCP_DIR"
+npm install --quiet 2>/dev/null || true
+npm run build 2>/dev/null || true
+npm prune --omit=dev --quiet 2>/dev/null || true
+
+# Write env file for MCP server (only readable by deploy user)
+cat > "/home/${deployUser}/.mcp.env" <<MCPENV
+SUPABASE_URL="${domain}"
+SUPABASE_SERVICE_ROLE_KEY="${secrets.serviceRoleKey}"
+SUPABASE_ANON_KEY="${secrets.anonKey}"
+SUPABASE_JWT_SECRET="${secrets.jwtSecret}"
+SUPABASE_DB_URL="postgresql://postgres.${serverName}:${secrets.postgresPassword}@localhost:5432/postgres"
+SUPABASE_FUNCTIONS_DIR="/root/supabase/docker/volumes/functions"
+MCPENV
+# Allow deploy user to create/update/delete edge functions
+chown -R "${deployUser}:${deployUser}" /root/supabase/docker/volumes/functions
+chmod 600 "/home/${deployUser}/.mcp.env"
+chown "${deployUser}:${deployUser}" "/home/${deployUser}/.mcp.env"
+
+# Create wrapper script that sources env and launches the stdio MCP server
+mkdir -p "/home/${deployUser}/bin"
+cat > "/home/${deployUser}/bin/supabase-mcp" <<'MCPWRAP'
+#!/bin/bash
+set -a
+source "$HOME/.mcp.env"
+set +a
+exec node "$HOME/mcp-server/dist/server.js"
+MCPWRAP
+chmod +x "/home/${deployUser}/bin/supabase-mcp"
+chown -R "${deployUser}:${deployUser}" "$MCP_DIR" "/home/${deployUser}/bin"
+
+cd /root/supabase/docker
 
 set -e
 
@@ -2484,7 +2499,8 @@ update_status "complete"
 unset HETZNER_TOKEN
 sed -i "s/Bearer [a-zA-Z0-9]*/Bearer REDACTED/g" /var/log/supabase-deploy.log
 sed -i "s/HETZNER_TOKEN=\\"[^\\"]*\\"/HETZNER_TOKEN=\\"REDACTED\\"/g" /var/log/supabase-deploy.log
-sed -i "s/sshpass -p '[^']*'/sshpass -p 'REDACTED'/g" /var/log/supabase-deploy.log
+sed -i "s/AWS_ACCESS_KEY_ID=[^ ]*/AWS_ACCESS_KEY_ID=REDACTED/g" /var/log/supabase-deploy.log
+sed -i "s/AWS_SECRET_ACCESS_KEY=[^ ]*/AWS_SECRET_ACCESS_KEY=REDACTED/g" /var/log/supabase-deploy.log
 
 echo "DEPLOY_COMPLETED_AT:$(date -Iseconds)"
 `;
