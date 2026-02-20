@@ -48,6 +48,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKUP_CONF="${SCRIPT_DIR}/backup.env"
+STATUS_FILE="${SCRIPT_DIR}/backup-status.json"
 
 # ── Colors ──────────────────────────────────────────────────────────────────
 NO_COLOR='' RED='' CYAN='' GREEN='' YELLOW=''
@@ -184,6 +185,20 @@ EOJSON
     esac
 }
 
+# ── Status file ─────────────────────────────────────────────────────────────
+_backup_start_time=0
+_backup_start_iso=""
+_dump_size_bytes=0
+_snapshot_id=""
+
+write_status() {
+    local success="$1"
+    local error="${2:-}"
+    local elapsed=$(( $(date +%s) - _backup_start_time ))
+    printf '{"success":%s,"timestamp":"%s","started":"%s","duration_seconds":%s,"dump_size_bytes":%s,"snapshot_id":"%s","error":"%s","server_name":"%s"}\n' \
+        "$success" "$(date -Iseconds)" "$_backup_start_iso" "$elapsed" "$_dump_size_bytes" "$_snapshot_id" "$error" "$SERVER_NAME" > "$STATUS_FILE"
+}
+
 # ── Functions ───────────────────────────────────────────────────────────────
 
 do_init() {
@@ -200,8 +215,10 @@ do_init() {
 }
 
 do_backup() {
-    local start_time
-    start_time=$(date +%s)
+    _backup_start_time=$(date +%s)
+    _backup_start_iso=$(date -Iseconds)
+    _dump_size_bytes=0
+    _snapshot_id=""
 
     STAGING_DIR=$(mktemp -d /tmp/supabase-backup-${SERVER_NAME}.XXXXXX)
 
@@ -224,11 +241,13 @@ do_backup() {
 EOJSON
 
     if ! docker exec "$POSTGRES_CONTAINER" pg_dumpall -U "$POSTGRES_USER" --clean 2>/dev/null | gzip > "$dump_file"; then
-        local errmsg="[$SERVER_NAME] Postgres dump FAILED"
-        notify "fail" "$errmsg"
-        fail "$errmsg"
+        local errmsg="pg_dumpall failed"
+        write_status false "$errmsg"
+        notify "fail" "[$SERVER_NAME] $errmsg"
+        fail "[$SERVER_NAME] Postgres dump FAILED"
     fi
 
+    _dump_size_bytes=$(stat -c%s "$dump_file" 2>/dev/null || stat -f%z "$dump_file" 2>/dev/null || echo 0)
     local dump_size
     dump_size=$(du -sh "$dump_file" | cut -f1)
     ok "[$SERVER_NAME] Postgres dump: $dump_size"
@@ -283,20 +302,23 @@ EOJSON
     # ── 4. Run restic backup ────────────────────────────────────────────
     info "[$SERVER_NAME] Uploading to $BACKUP_BACKEND..."
 
-    if ! restic backup \
+    local restic_output
+    if ! restic_output=$(restic backup \
         --tag supabase \
         --tag "$SERVER_NAME" \
         --tag "$(date +%Y%m%d)" \
         --host "$SERVER_NAME" \
-        --verbose \
-        "${backup_paths[@]}" 2>&1; then
+        --json \
+        "${backup_paths[@]}" 2>&1 | tail -1); then
 
-        local errmsg="[$SERVER_NAME] Restic backup FAILED"
-        notify "fail" "$errmsg"
-        fail "$errmsg"
+        local errmsg="Restic backup failed"
+        write_status false "$errmsg"
+        notify "fail" "[$SERVER_NAME] $errmsg"
+        fail "[$SERVER_NAME] Restic backup FAILED"
     fi
 
-    ok "[$SERVER_NAME] Backup uploaded"
+    _snapshot_id=$(echo "$restic_output" | grep -o '"snapshot_id":"[^"]*"' | cut -d'"' -f4 || true)
+    ok "[$SERVER_NAME] Backup uploaded (snapshot: ${_snapshot_id:-unknown})"
 
     # ── 5. Prune old snapshots ──────────────────────────────────────────
     info "[$SERVER_NAME] Pruning (keep: ${RETENTION_DAILY}d / ${RETENTION_WEEKLY}w / ${RETENTION_MONTHLY}m)..."
@@ -308,8 +330,9 @@ EOJSON
         --keep-monthly "$RETENTION_MONTHLY" \
         --prune 2>&1
 
-    local elapsed=$(( $(date +%s) - start_time ))
+    local elapsed=$(( $(date +%s) - _backup_start_time ))
     local summary="Completed in ${elapsed}s. DB dump: ${dump_size}. Configs: ${config_count} files."
+    write_status true
     ok "[$SERVER_NAME] Backup complete ($summary)"
 
     notify "ok" "$summary"

@@ -9,5 +9,4 @@ RUN npm install --production 2>/dev/null; exit 0
 COPY server.js ./
 COPY public ./public
 EXPOSE 3001
-USER node
 CMD ["node", "server.js"]

@@ -16,7 +16,7 @@ function isValidContainerId(id) {
 }
 
 function isValidServiceName(name) {
-  return /^[a-z0-9_-]+$/.test(name) && name.length < 128;
+  return /^[a-z0-9_.-]+$/.test(name) && name.length < 128;
 }
 
 function sanitizeLines(n) {
@@ -285,6 +285,30 @@ async function handleContainerRestart(req, res, containerId) {
   }
 }
 
+async function handleContainerStop(req, res, containerId) {
+  if (!isValidContainerId(containerId)) {
+    return sendJson(res, { error: 'Invalid container ID' }, 400);
+  }
+  try {
+    const result = await dockerRequest('POST', `/containers/${containerId}/stop?t=10`);
+    sendJson(res, { success: result.status === 204 || result.status === 304, status: result.status });
+  } catch (err) {
+    sendJson(res, { error: 'Failed to stop container', details: err.message }, 502);
+  }
+}
+
+async function handleContainerStart(req, res, containerId) {
+  if (!isValidContainerId(containerId)) {
+    return sendJson(res, { error: 'Invalid container ID' }, 400);
+  }
+  try {
+    const result = await dockerRequest('POST', `/containers/${containerId}/start`);
+    sendJson(res, { success: result.status === 204 || result.status === 304, status: result.status });
+  } catch (err) {
+    sendJson(res, { error: 'Failed to start container', details: err.message }, 502);
+  }
+}
+
 async function handleRestartAll(req, res) {
   try {
     const result = await dockerRequest('GET', '/containers/json?all=true');
@@ -306,91 +330,6 @@ async function handleRestartAll(req, res) {
   }
 }
 
-async function handleUpdate(req, res) {
-  try {
-    await execAsync(`docker compose -f ${SUPABASE_DIR}/docker-compose.yml pull`);
-    await execAsync(`docker compose -f ${SUPABASE_DIR}/docker-compose.yml up -d`);
-    sendJson(res, { success: true, message: 'Update completed' });
-  } catch (err) {
-    sendJson(res, { error: 'Update failed', details: err.message }, 500);
-  }
-}
-
-async function handleUpdateCheck(req, res) {
-  try {
-    const result = await dockerRequest('GET', '/containers/json?all=true');
-    const containers = (result.data || []).filter(
-      (c) => c.Labels && c.Labels['com.docker.compose.project'] === 'supabase'
-    );
-    const services = [];
-    for (const c of containers) {
-      const name = (c.Names[0] || '').replace(/^\//, '');
-      const image = c.Image;
-      const imageId = c.ImageID;
-      let latestDigest = '';
-      let updateAvailable = false;
-      try {
-        const inspectResult = await dockerRequest('GET', `/images/${encodeURIComponent(image)}/json`);
-        const repoDigests = (inspectResult.data && inspectResult.data.RepoDigests) || [];
-        latestDigest = repoDigests[0] || '';
-      } catch { /* ignore */ }
-      services.push({ name, image, imageId: (imageId || '').slice(0, 19), latestDigest, updateAvailable });
-    }
-    sendJson(res, { services });
-  } catch (err) {
-    sendJson(res, { error: 'Check failed', details: err.message }, 500);
-  }
-}
-
-async function handleUpdatePull(req, res) {
-  try {
-    const { stdout, stderr } = await execAsync(`docker compose -f ${SUPABASE_DIR}/docker-compose.yml pull`);
-    sendJson(res, { success: true, output: stdout + stderr });
-  } catch (err) {
-    sendJson(res, { error: 'Pull failed', details: err.message }, 500);
-  }
-}
-
-async function handleUpdatePullService(req, res, service) {
-  if (!isValidServiceName(service)) {
-    return sendJson(res, { error: 'Invalid service name' }, 400);
-  }
-  try {
-    const { stdout, stderr } = await execAsync(
-      `docker compose -f ${SUPABASE_DIR}/docker-compose.yml pull ${service}`
-    );
-    sendJson(res, { success: true, service, output: stdout + stderr });
-  } catch (err) {
-    sendJson(res, { error: 'Pull failed', details: err.message }, 500);
-  }
-}
-
-async function handleUpdateApply(req, res) {
-  try {
-    const { stdout, stderr } = await execAsync(
-      `docker compose -f ${SUPABASE_DIR}/docker-compose.yml up -d`
-    );
-    sendJson(res, { success: true, output: stdout + stderr });
-  } catch (err) {
-    sendJson(res, { error: 'Apply failed', details: err.message }, 500);
-  }
-}
-
-async function handleUpdateImages(req, res) {
-  try {
-    const result = await dockerRequest('GET', '/containers/json?all=true');
-    const images = (result.data || []).map((c) => ({
-      name: (c.Names[0] || '').replace(/^\//, ''),
-      image: c.Image,
-      imageId: (c.ImageID || '').slice(0, 19),
-      created: c.Created,
-    }));
-    sendJson(res, images);
-  } catch (err) {
-    sendJson(res, { error: 'Failed to list images', details: err.message }, 502);
-  }
-}
-
 async function handleBackupSnapshots(req, res) {
   try {
     const repo = process.env.RESTIC_REPOSITORY || '/backup';
@@ -405,15 +344,35 @@ async function handleBackupSnapshots(req, res) {
 }
 
 async function handleBackupStatus(req, res) {
-  const logPath = path.join(HOST_LOGS, 'backup.log');
-  const log = readFile(logPath);
-  const lines = log.trim().split('\n').filter(Boolean);
-  const lastLine = lines[lines.length - 1] || '';
-  const lastMatch = lastLine.match(/^\[(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2})/);
+  // Primary: read backup-status.json written by backup script
+  const statusPath = path.join('/supabase', 'backup-status.json');
+  let statusData = null;
+  try {
+    const raw = fs.readFileSync(statusPath, 'utf8');
+    statusData = JSON.parse(raw);
+  } catch { /* file may not exist yet */ }
+
+  // Fallback: parse log file for line count
+  let logLines = 0;
+  try {
+    const logFile = fs.readdirSync(HOST_LOGS).find(f => f.startsWith('supabase-backup-')) || 'backup.log';
+    const logPath = path.join(HOST_LOGS, logFile);
+    const log = readFile(logPath);
+    const lines = log.trim().split('\n').filter(Boolean);
+    logLines = lines.length;
+  } catch {}
+
   sendJson(res, {
-    lastBackup: lastMatch ? lastMatch[1] : 'Unknown',
-    nextScheduled: 'See crontab',
-    logLines: lines.length,
+    success: statusData?.success ?? null,
+    timestamp: statusData?.timestamp ?? null,
+    started: statusData?.started ?? null,
+    durationSeconds: statusData?.duration_seconds ?? null,
+    dumpSizeBytes: statusData?.dump_size_bytes ?? null,
+    snapshotId: statusData?.snapshot_id ?? null,
+    error: statusData?.error ?? null,
+    serverName: statusData?.server_name ?? null,
+    logLines: logLines,
+    hasStatusFile: statusData !== null,
   });
 }
 
@@ -421,7 +380,7 @@ async function handleBackupStatus(req, res) {
 async function handleLogsFile(req, res, filename) {
   const allowed = {
     deploy: 'supabase-deploy.log',
-    backup: 'backup.log',
+    backup: fs.readdirSync(HOST_LOGS).find(f => f.startsWith('supabase-backup-')) || 'backup.log',
   };
   const file = allowed[filename];
   if (!file) return sendJson(res, { error: 'Unknown log file' }, 404);
@@ -552,26 +511,13 @@ const server = http.createServer(async (req, res) => {
     if (containerRestartMatch && method === 'POST') {
       return handleContainerRestart(req, res, containerRestartMatch[1]);
     }
-
-    // Update routes
-    if (urlPath === '/api/update' && method === 'POST') {
-      return handleUpdate(req, res);
+    const containerStopMatch = urlPath.match(/^\/api\/containers\/([a-f0-9]+)\/stop$/i);
+    if (containerStopMatch && method === 'POST') {
+      return handleContainerStop(req, res, containerStopMatch[1]);
     }
-    if (urlPath === '/api/update/check' && method === 'GET') {
-      return handleUpdateCheck(req, res);
-    }
-    if (urlPath === '/api/update/pull' && method === 'POST') {
-      return handleUpdatePull(req, res);
-    }
-    const pullServiceMatch = urlPath.match(/^\/api\/update\/pull\/([a-z0-9_-]+)$/);
-    if (pullServiceMatch && method === 'POST') {
-      return handleUpdatePullService(req, res, pullServiceMatch[1]);
-    }
-    if (urlPath === '/api/update/apply' && method === 'POST') {
-      return handleUpdateApply(req, res);
-    }
-    if (urlPath === '/api/update/images' && method === 'GET') {
-      return handleUpdateImages(req, res);
+    const containerStartMatch = urlPath.match(/^\/api\/containers\/([a-f0-9]+)\/start$/i);
+    if (containerStartMatch && method === 'POST') {
+      return handleContainerStart(req, res, containerStartMatch[1]);
     }
 
     // Backup routes
