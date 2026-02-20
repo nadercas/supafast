@@ -1897,6 +1897,8 @@ export async function generateCloudInit(config, secrets) {
     siteUrl, additionalRedirectUrls,
   } = config;
 
+  const host = domain.replace(/^https?:\/\//, '');
+
   // Build tarball of static config files
   const tarFiles = [
     { name: 'volumes/api/kong.yml', content: getKongYml(secrets.anonKey, secrets.serviceRoleKey, 'supabase', 'not_being_used') },
@@ -2208,12 +2210,12 @@ update_status "hardening_done"
 # ═══════════════════════════════════════════════════════════════════════════════
 update_status "supabase"
 
-mkdir -p /root/supabase/docker/volumes/{api,db/init,logs,pooler,functions/main,functions/hello,caddy/snippets,storage,snippets,redis}
-${enableAuthelia ? 'mkdir -p /root/supabase/docker/volumes/authelia' : ''}
-cd /root/supabase/docker
+mkdir -p /opt/supabase/docker/volumes/{api,db/init,logs,pooler,functions/main,functions/hello,caddy/snippets,storage,snippets,redis}
+${enableAuthelia ? 'mkdir -p /opt/supabase/docker/volumes/authelia' : ''}
+cd /opt/supabase/docker
 
 # ── Extract static config files from embedded tarball ──
-base64 -d <<'PAYLOAD_EOF' | gzip -d | tar x -C /root/supabase/docker
+base64 -d <<'PAYLOAD_EOF' | gzip -d | tar x -C /opt/supabase/docker
 ${payload}
 PAYLOAD_EOF
 ${enableAuthelia ? `
@@ -2331,7 +2333,7 @@ update_status "backup_init"
 apt-get install -y -qq restic
 
 # Write the backup script
-cat > /root/supabase/docker/supabase-backup.sh <<'BACKUPSCRIPT'
+cat > /opt/supabase/docker/supabase-backup.sh <<'BACKUPSCRIPT'
 #!/bin/bash
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "\${BASH_SOURCE[0]}")" && pwd)"
@@ -2409,13 +2411,13 @@ if [ -n "\${HEALTHCHECK_URL:-}" ]; then
   curl -fsS -m 10 --retry 3 "\${HEALTHCHECK_URL}" >/dev/null 2>&1 || true
 fi
 BACKUPSCRIPT
-chmod +x /root/supabase/docker/supabase-backup.sh
+chmod +x /opt/supabase/docker/supabase-backup.sh
 
 # Write backup config
-cat > /root/supabase/docker/backup.env <<BENV
+cat > /opt/supabase/docker/backup.env <<BENV
 SERVER_NAME="${serverName}"
 RESTIC_PASSWORD="${secrets.resticPassword}"
-SUPABASE_DOCKER_DIR="/root/supabase/docker"
+SUPABASE_DOCKER_DIR="/opt/supabase/docker"
 POSTGRES_CONTAINER="supabase-db"
 POSTGRES_USER="postgres"
 RESTIC_REPOSITORY="$S3_REPO"
@@ -2426,7 +2428,7 @@ RETENTION_WEEKLY=4
 RETENTION_MONTHLY=6
 HEALTHCHECK_URL="${healthcheckUrl || ''}"
 BENV
-chmod 600 /root/supabase/docker/backup.env
+chmod 600 /opt/supabase/docker/backup.env
 
 # Init restic repo (S3)
 export RESTIC_PASSWORD="${secrets.resticPassword}"
@@ -2437,11 +2439,11 @@ restic init || true
 
 # First backup
 update_status "backup_first"
-cd /root/supabase/docker
+cd /opt/supabase/docker
 ./supabase-backup.sh || true
 
 # Cron + log rotation
-SCRIPT="/root/supabase/docker/supabase-backup.sh"
+SCRIPT="/opt/supabase/docker/supabase-backup.sh"
 LOG="/var/log/supabase-backup-${serverName}.log"
 (crontab -l 2>/dev/null; echo "0 3 * * * $SCRIPT >> $LOG 2>&1 # supabase-backup-${serverName}") | crontab -
 
@@ -2483,10 +2485,10 @@ SUPABASE_SERVICE_ROLE_KEY="${secrets.serviceRoleKey}"
 SUPABASE_ANON_KEY="${secrets.anonKey}"
 SUPABASE_JWT_SECRET="${secrets.jwtSecret}"
 SUPABASE_DB_URL="postgresql://postgres.${serverName}:${secrets.postgresPassword}@localhost:5432/postgres"
-SUPABASE_FUNCTIONS_DIR="/root/supabase/docker/volumes/functions"
+SUPABASE_FUNCTIONS_DIR="/opt/supabase/docker/volumes/functions"
 MCPENV
 # Allow deploy user to create/update/delete edge functions
-chown -R "${deployUser}:${deployUser}" /root/supabase/docker/volumes/functions
+chown -R "${deployUser}:${deployUser}" /opt/supabase/docker/volumes/functions
 chmod 600 "/home/${deployUser}/.mcp.env"
 chown "${deployUser}:${deployUser}" "/home/${deployUser}/.mcp.env"
 
@@ -2502,7 +2504,7 @@ MCPWRAP
 chmod +x "/home/${deployUser}/bin/supabase-mcp"
 chown -R "${deployUser}:${deployUser}" "$MCP_DIR" "/home/${deployUser}/bin"
 
-cd /root/supabase/docker
+cd /opt/supabase/docker
 
 set -e
 

@@ -170,7 +170,7 @@ Claude Code (local) ──── SSH stdio ──── MCP server (on your serv
 Unlike the hosted Supabase platform (which requires the CLI), our MCP server deploys edge functions directly to the filesystem. The Supabase Edge Runtime hot-reloads on file changes — functions are live immediately:
 
 ```
-Claude → MCP create_edge_function → writes to /root/supabase/docker/volumes/functions/name/index.ts
+Claude → MCP create_edge_function → writes to /opt/supabase/docker/volumes/functions/name/index.ts
                                                                     ↓
                                               Edge Runtime detects change → function is live
 ```
@@ -266,7 +266,7 @@ Backups are stored at `s3://YOUR-BUCKET/SERVER-NAME/` with restic's content-addr
 Some Supabase Studio features call the Supabase Cloud Management API and will not work on self-hosted:
 
 - **Publishable keys** — use your anon key instead
-- **API key management UI** — manage keys directly in `/root/supabase/docker/.env`
+- **API key management UI** — manage keys directly in `/opt/supabase/docker/.env`
 - **JWT secret rotation UI** — update `JWT_SECRET` in `.env` and restart containers
 
 Everything else — Studio, SQL editor, Auth, Storage, Edge Functions, Realtime — works fully.
