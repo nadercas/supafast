@@ -172,25 +172,26 @@ restic snapshots
 # See files in a snapshot
 restic ls latest
 
-# ── Restore database only (recommended) ──
-./supabase-backup.sh --restore-db
+# ── Run a manual backup now ──
+./supabase-backup.sh
 
-# ── Full restore (DB + configs + storage files) ──
-./supabase-backup.sh --restore
+# ── Restore database from latest snapshot ──
+RESTORE_DIR=$(mktemp -d)
+restic restore latest --target "$RESTORE_DIR"
+gunzip -c "$RESTORE_DIR"/tmp/supabase-backup.*/postgres_dump.sql.gz \
+  | docker exec -i supabase-db psql -U postgres
 
 # ── Restore a specific snapshot ──
-./supabase-backup.sh --restore-db &lt;snapshot-id&gt;
-
-# ── Run a manual backup now ──
-./supabase-backup.sh --now</pre>
+restic restore &lt;snapshot-id&gt; --target "$RESTORE_DIR"</pre>
       <p style="margin-top:16px;margin-bottom:8px;color:var(--muted)"><strong>Full Disaster Recovery</strong></p>
       <p style="margin-bottom:8px;color:var(--dim);font-size:12px">Restic backs up your data and config (not the OS or Docker). To fully restore on a new server:</p>
       <ol style="color:var(--dim);font-size:12px;padding-left:20px;line-height:2">
         <li>Set up a fresh server with Docker installed</li>
         <li>Re-deploy Supabase (via the deployer or manually with docker-compose)</li>
         <li>Copy <code style="color:var(--muted)">backup.env</code> and <code style="color:var(--muted)">supabase-backup.sh</code> to the new server</li>
-        <li>Restore the database: <code style="color:var(--muted)">./supabase-backup.sh --restore-db</code></li>
-        <li>Restore configs: <code style="color:var(--muted)">./supabase-backup.sh --restore</code> then copy .env, Caddyfile, Authelia configs from the restored files</li>
+        <li>Restore files: <code style="color:var(--muted)">restic restore latest --target /tmp/restore</code></li>
+        <li>Restore DB: <code style="color:var(--muted)">gunzip -c /tmp/restore/.../postgres_dump.sql.gz | docker exec -i supabase-db psql -U postgres</code></li>
+        <li>Copy configs back: .env, Caddyfile, Authelia files from <code style="color:var(--muted)">/tmp/restore/.../config/</code></li>
         <li>Restart all services: <code style="color:var(--muted)">docker compose down && docker compose up -d</code></li>
       </ol>
       <p style="margin-top:12px;color:var(--dim);font-size:12px">Backups include: Postgres database dump, .env, docker-compose.yml, Caddy/Authelia configs, and storage objects. Backups run daily at 3:00 AM via cron.</p>
