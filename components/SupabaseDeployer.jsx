@@ -23,12 +23,39 @@ const LOCATIONS = [
   { id: "hil", name: "Hillsboro", flag: "🇺🇸" },
 ];
 
-const SERVER_TYPES = [
-  { id: "cx23", cpu: "2 vCPU", ram: "4 GB", disk: "40 GB", price: 5.39, rec: false },
-  { id: "cx33", cpu: "4 vCPU", ram: "8 GB", disk: "80 GB", price: 8.49, rec: true },
-  { id: "cx43", cpu: "8 vCPU", ram: "16 GB", disk: "160 GB", price: 16.49, rec: false },
-  { id: "cx53", cpu: "16 vCPU", ram: "32 GB", disk: "320 GB", price: 31.49, rec: false },
+const SERVER_CATEGORIES = [
+  {
+    label: "Shared · Cost Optimized",
+    types: [
+      { id: "cx23", cpu: "2 vCPU", ram: "4 GB",   disk: "40 GB",  price: 2.99  },
+      { id: "cx33", cpu: "4 vCPU", ram: "8 GB",   disk: "80 GB",  price: 4.99, rec: true },
+      { id: "cx43", cpu: "8 vCPU", ram: "16 GB",  disk: "160 GB", price: 8.99  },
+      { id: "cx53", cpu: "16 vCPU", ram: "32 GB", disk: "320 GB", price: 16.99 },
+    ],
+  },
+  {
+    label: "Shared · Regular Performance",
+    types: [
+      { id: "cpx22", cpu: "2 vCPU",  ram: "4 GB",  disk: "80 GB",  price: 5.99  },
+      { id: "cpx32", cpu: "4 vCPU",  ram: "8 GB",  disk: "160 GB", price: 10.49 },
+      { id: "cpx42", cpu: "8 vCPU",  ram: "16 GB", disk: "320 GB", price: 19.49 },
+      { id: "cpx52", cpu: "12 vCPU", ram: "24 GB", disk: "480 GB", price: 27.99 },
+      { id: "cpx62", cpu: "16 vCPU", ram: "32 GB", disk: "640 GB", price: 38.49 },
+    ],
+  },
+  {
+    label: "Dedicated · General Purpose",
+    types: [
+      { id: "ccx13", cpu: "2 vCPU",  ram: "8 GB",   disk: "80 GB",  price: 11.99  },
+      { id: "ccx23", cpu: "4 vCPU",  ram: "16 GB",  disk: "160 GB", price: 23.99  },
+      { id: "ccx33", cpu: "8 vCPU",  ram: "32 GB",  disk: "240 GB", price: 47.99  },
+      { id: "ccx43", cpu: "16 vCPU", ram: "64 GB",  disk: "360 GB", price: 95.99  },
+      { id: "ccx53", cpu: "32 vCPU", ram: "128 GB", disk: "600 GB", price: 191.99 },
+      { id: "ccx63", cpu: "48 vCPU", ram: "192 GB", disk: "960 GB", price: 287.99 },
+    ],
+  },
 ];
+const SERVER_TYPES = SERVER_CATEGORIES.flatMap((c) => c.types);
 
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -226,6 +253,19 @@ class HetznerClient {
     return !!data.servers;
   }
 
+  async fetchServerAvailability(location) {
+    // Returns set of server type IDs unavailable in the given location
+    const data = await this.request("GET", `/server_types?per_page=100`);
+    const unavailable = new Set();
+    for (const st of data.server_types || []) {
+      const loc = st.prices?.find((p) => p.location === location);
+      if (!loc) { unavailable.add(st.name); continue; }
+      // Hetzner marks types as unavailable via deprecation or missing location entry
+      if (st.deprecation !== null && st.deprecation !== undefined) unavailable.add(st.name);
+    }
+    return unavailable;
+  }
+
   async listSshKeys() {
     const data = await this.request("GET", "/ssh_keys");
     return data.ssh_keys || [];
@@ -367,6 +407,7 @@ export default function SupabaseDeployer() {
   const [tokenChecking, setTokenChecking] = useState(false);
   const [deployError, setDeployError] = useState(null);
   const [showPassword, setShowPassword] = useState(false);
+  const [unavailableTypes, setUnavailableTypes] = useState(new Set());
   const [copyFeedback, setCopyFeedback] = useState(false);
   const logsRef = useRef(null);
   const deployAbort = useRef(null);
@@ -413,6 +454,15 @@ export default function SupabaseDeployer() {
   useEffect(() => {
     if (logsRef.current) logsRef.current.scrollTop = logsRef.current.scrollHeight;
   }, [logs]);
+
+  // ── Fetch server availability for selected location ───────────────────
+  useEffect(() => {
+    if (!tokenValid || !config.hetznerCloudToken) return;
+    const client = new HetznerClient(config.hetznerCloudToken);
+    client.fetchServerAvailability(config.location)
+      .then(setUnavailableTypes)
+      .catch(() => setUnavailableTypes(new Set()));
+  }, [tokenValid, config.hetznerCloudToken, config.location]);
 
   // ── Validate API token ────────────────────────────────────────────────
   const validateToken = useCallback(async () => {
@@ -820,18 +870,31 @@ export default function SupabaseDeployer() {
                 </div>
                 <div>
                   <label style={S.label}>Server Type</label>
-                  <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
-                    {SERVER_TYPES.map((t) => (
-                      <Opt key={t.id} selected={config.serverType === t.id} onClick={() => update("serverType", t.id)}>
-                        <div style={{ flex: 1 }}>
-                          <div style={{ fontSize: 12, fontWeight: 600, display: "flex", alignItems: "center", gap: 6 }}>
-                            {t.id.toUpperCase()}
-                            {t.rec && <Badge>REC</Badge>}
-                          </div>
-                          <div style={{ fontSize: 10, color: C.dim }}>{t.cpu} · {t.ram} · {t.disk}</div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                    {SERVER_CATEGORIES.map((cat) => (
+                      <div key={cat.label}>
+                        <div style={{ fontSize: 9, fontWeight: 600, color: C.dim, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 4 }}>{cat.label}</div>
+                        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                          {cat.types.map((t) => {
+                            const unavail = unavailableTypes.has(t.id);
+                            return (
+                              <Opt key={t.id} selected={config.serverType === t.id}
+                                onClick={() => !unavail && update("serverType", t.id)}
+                                style={{ opacity: unavail ? 0.35 : 1, cursor: unavail ? "not-allowed" : "pointer" }}>
+                                <div style={{ flex: 1 }}>
+                                  <div style={{ fontSize: 12, fontWeight: 600, display: "flex", alignItems: "center", gap: 6 }}>
+                                    {t.id.toUpperCase()}
+                                    {t.rec && <Badge>REC</Badge>}
+                                    {unavail && <span style={{ fontSize: 9, color: "#ef4444", fontWeight: 400 }}>unavailable</span>}
+                                  </div>
+                                  <div style={{ fontSize: 10, color: C.dim }}>{t.cpu} · {t.ram} · {t.disk}</div>
+                                </div>
+                                <span style={{ fontSize: 11, color: C.muted }}>€{t.price}/mo</span>
+                              </Opt>
+                            );
+                          })}
                         </div>
-                        <span style={{ fontSize: 11, color: C.muted }}>€{t.price}/mo</span>
-                      </Opt>
+                      </div>
                     ))}
                   </div>
                 </div>
