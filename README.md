@@ -4,6 +4,9 @@
 
 Deploy a production-hardened Supabase instance in ~10 minutes. All secrets are generated in your browser using Web Crypto API and never transmitted to any server.
 
+<img width="1366" height="768" alt="supafast" src="https://github.com/user-attachments/assets/7a42f980-8cbd-405c-90c6-1b82ae2aadb1" />
+
+
 ---
 
 ## Why I Built This
@@ -74,17 +77,18 @@ It's basically a **managed Supabase solution**, but you own the infrastructure.
 - Hetzner Cloud account + API token (Read & Write)
 - Domain with DNS access
 - AWS S3 bucket for backups (see [S3 Setup](#s3-setup))
+- SMTP Credentials to setup Supabase Auth (use resend or similar)
 
 ### Deploy
 
 1. Visit the deployer UI
 2. Enter your Hetzner Cloud API token
 3. Configure:
-   - Server name, location, and type (CX33 recommended — 4 vCPU, 8 GB RAM, ~€8.49/mo)
-   - Domain (e.g. `https://api.yourdomain.com`)
+   - Server name, location, and type (CX33 recommended — 4 vCPU, 8 GB RAM, ~€4.99/mo) - Also optimized to work flawlessly on cheapest instance CX23 (~€2.99/mo)
+   - Domain (e.g. `https://supabase.yourdomain.com`)
    - Supabase credentials and display name
    - AWS S3 bucket, region, access key, secret key
-   - Optional: enable Authelia 2FA, Redis
+   - Optional: enable Authelia 2FA, Redis (While I made this optional, it is highly recommended you turn it on for 2FA as self hosting Supabase with Basic Auth is not recommended.
 4. Review and deploy
 5. **Save your credentials immediately** — they exist only in browser memory
 
@@ -110,8 +114,8 @@ The deployer automatically installs a full Supabase MCP server on your server. A
       "args": [
         "-i", "~/.ssh/your-server-name",
         "-o", "StrictHostKeyChecking=accept-new",
-        "deploy@YOUR_SERVER_IP",
-        "/home/deploy/bin/supabase-mcp"
+        "username@YOUR_SERVER_IP",
+        "/home/username/bin/supabase-mcp"
       ]
     }
   }
