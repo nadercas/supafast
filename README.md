@@ -42,6 +42,7 @@ It's basically a **managed Supabase solution**, but you own the infrastructure.
 - Unattended security updates
 - Swap configured for server type
 - Docker with hardening flags
+- A management panel at /admin/ to perform basic docker operations for all containers (start/stop/restart), and also to display critical logs / banned IP's on Fail2ban / and backup data.
 
 **Supabase Stack**
 - PostgreSQL 15
