@@ -2325,6 +2325,38 @@ docker exec authelia authelia storage user totp generate "${supabaseUser}" \
 ` : ''}
 update_status "supabase_done"
 
+# ── Systemd path unit: auto-recreate edge functions when secrets file changes ──
+# When the management panel writes a secret to volumes/functions/.env, Docker's
+# plain container restart doesn't re-read env_file. This path unit detects the
+# file change and runs docker compose up --force-recreate so new secrets are
+# immediately available to edge functions.
+cat > /etc/systemd/system/supabase-functions-reload.service <<'FUNCSVC'
+[Unit]
+Description=Recreate supabase-edge-functions when secrets file changes
+After=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/supabase/docker
+ExecStartPre=/bin/sleep 2
+ExecStart=/usr/bin/docker compose up -d --no-deps --force-recreate functions
+FUNCSVC
+
+cat > /etc/systemd/system/supabase-functions-reload.path <<'FUNCPATH'
+[Unit]
+Description=Watch edge functions secrets file for changes
+
+[Path]
+PathModified=/opt/supabase/docker/volumes/functions/.env
+Unit=supabase-functions-reload.service
+
+[Install]
+WantedBy=multi-user.target
+FUNCPATH
+
+systemctl daemon-reload
+systemctl enable --now supabase-functions-reload.path
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # PHASE 3: S3 BACKUP SETUP
 # ═══════════════════════════════════════════════════════════════════════════════

@@ -263,8 +263,10 @@ async function handleSetSecret(req, res) {
     const existed = env.has(key);
     env.set(key, value);
     fs.writeFileSync(SECRETS_ENV_PATH, serializeEnvFile(env), 'utf8');
-    const { restarted } = await restartEdgeFunctionsContainer();
-    sendJson(res, { success: true, action: existed ? 'updated' : 'created', key, restarted });
+    // The systemd path unit (supabase-functions-reload.path) detects the file
+    // change and runs `docker compose up --force-recreate functions` on the host,
+    // which re-reads env_file so the new secret is live in ~5 seconds.
+    sendJson(res, { success: true, action: existed ? 'updated' : 'created', key, restarted: true });
   } catch (err) {
     sendJson(res, { error: 'Failed to set secret', details: err.message }, 500);
   }
@@ -285,8 +287,7 @@ async function handleDeleteSecret(req, res, key) {
     }
     env.delete(key);
     fs.writeFileSync(SECRETS_ENV_PATH, serializeEnvFile(env), 'utf8');
-    const { restarted } = await restartEdgeFunctionsContainer();
-    sendJson(res, { success: true, key, restarted });
+    sendJson(res, { success: true, key, restarted: true });
   } catch (err) {
     sendJson(res, { error: 'Failed to delete secret', details: err.message }, 500);
   }

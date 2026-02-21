@@ -596,7 +596,7 @@ async function addSecret() {
     body: JSON.stringify({ key, value })
   });
   if (data && data.success) {
-    toast(`Secret '${key}' ${data.action}` + (data.restarted ? ' — runtime restarted' : ''), 'success');
+    toast(`Secret '${key}' ${data.action} — functions container recreating (~5s)`, 'success');
     keyEl.value = '';
     valEl.value = '';
     loadSecrets();
@@ -607,7 +607,7 @@ async function deleteSecret(key) {
   if (!confirm('Delete secret "' + key + '"?')) return;
   const data = await api('/api/secrets/' + encodeURIComponent(key), { method: 'DELETE' });
   if (data && data.success) {
-    toast(`Secret '${key}' deleted` + (data.restarted ? ' — runtime restarted' : ''), 'success');
+    toast(`Secret '${key}' deleted — functions container recreating (~5s)`, 'success');
     loadSecrets();
   }
 }
