@@ -185,6 +185,113 @@ function getDisk() {
   }
 }
 
+// --- Secrets Helpers ---
+
+const SECRETS_ENV_PATH = path.join(SUPABASE_DIR, 'volumes', 'functions', '.env');
+
+function parseEnvFile(content) {
+  const env = new Map();
+  for (const line of content.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const eqIndex = trimmed.indexOf('=');
+    if (eqIndex === -1) continue;
+    const key = trimmed.slice(0, eqIndex).trim();
+    let value = trimmed.slice(eqIndex + 1).trim();
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+      value = value.slice(1, -1);
+    }
+    env.set(key, value);
+  }
+  return env;
+}
+
+function serializeEnvFile(env) {
+  const lines = [];
+  for (const [key, value] of env) {
+    if (/[\s#"'\\$]/.test(value)) {
+      lines.push(`${key}="${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`);
+    } else {
+      lines.push(`${key}=${value}`);
+    }
+  }
+  return lines.join('\n') + '\n';
+}
+
+async function restartEdgeFunctionsContainer() {
+  try {
+    const result = await dockerRequest('GET', '/containers/json?all=true&filters=' + encodeURIComponent(JSON.stringify({ name: ['supabase-edge-functions'] })));
+    const containers = result.data || [];
+    if (containers.length === 0) return { restarted: false, error: 'Container not found' };
+    const containerId = containers[0].Id;
+    const restart = await dockerRequest('POST', `/containers/${containerId}/restart?t=10`);
+    return { restarted: restart.status === 204 };
+  } catch (err) {
+    return { restarted: false, error: err.message };
+  }
+}
+
+async function handleGetSecrets(req, res) {
+  try {
+    if (!fs.existsSync(SECRETS_ENV_PATH)) {
+      return sendJson(res, { keys: [] });
+    }
+    const env = parseEnvFile(fs.readFileSync(SECRETS_ENV_PATH, 'utf8'));
+    const keys = Array.from(env.keys());
+    sendJson(res, { keys });
+  } catch (err) {
+    sendJson(res, { error: 'Failed to read secrets', details: err.message }, 500);
+  }
+}
+
+async function handleSetSecret(req, res) {
+  const body = await readBody(req);
+  const { key, value } = body;
+
+  if (!key || typeof key !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
+    return sendJson(res, { error: 'Invalid key name. Use letters, numbers, and underscores only.' }, 400);
+  }
+  if (value === undefined || value === null || typeof value !== 'string') {
+    return sendJson(res, { error: 'Value is required and must be a string' }, 400);
+  }
+
+  try {
+    let env = new Map();
+    if (fs.existsSync(SECRETS_ENV_PATH)) {
+      env = parseEnvFile(fs.readFileSync(SECRETS_ENV_PATH, 'utf8'));
+    }
+    const existed = env.has(key);
+    env.set(key, value);
+    fs.writeFileSync(SECRETS_ENV_PATH, serializeEnvFile(env), 'utf8');
+    const { restarted } = await restartEdgeFunctionsContainer();
+    sendJson(res, { success: true, action: existed ? 'updated' : 'created', key, restarted });
+  } catch (err) {
+    sendJson(res, { error: 'Failed to set secret', details: err.message }, 500);
+  }
+}
+
+async function handleDeleteSecret(req, res, key) {
+  if (!key || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
+    return sendJson(res, { error: 'Invalid key name' }, 400);
+  }
+
+  try {
+    if (!fs.existsSync(SECRETS_ENV_PATH)) {
+      return sendJson(res, { error: 'No secrets file exists' }, 404);
+    }
+    const env = parseEnvFile(fs.readFileSync(SECRETS_ENV_PATH, 'utf8'));
+    if (!env.has(key)) {
+      return sendJson(res, { error: `Secret '${key}' not found` }, 404);
+    }
+    env.delete(key);
+    fs.writeFileSync(SECRETS_ENV_PATH, serializeEnvFile(env), 'utf8');
+    const { restarted } = await restartEdgeFunctionsContainer();
+    sendJson(res, { success: true, key, restarted });
+  } catch (err) {
+    sendJson(res, { error: 'Failed to delete secret', details: err.message }, 500);
+  }
+}
+
 // --- API Handlers ---
 
 async function handleSystem(req, res) {
@@ -531,6 +638,18 @@ const server = http.createServer(async (req, res) => {
     // Security routes
     if (urlPath === '/api/security/fail2ban' && method === 'GET') {
       return handleSecurityFail2ban(req, res);
+    }
+
+    // Secrets routes
+    if (urlPath === '/api/secrets' && method === 'GET') {
+      return handleGetSecrets(req, res);
+    }
+    if (urlPath === '/api/secrets' && method === 'POST') {
+      return handleSetSecret(req, res);
+    }
+    const secretDeleteMatch = urlPath.match(/^\/api\/secrets\/([A-Za-z_][A-Za-z0-9_]*)$/);
+    if (secretDeleteMatch && method === 'DELETE') {
+      return handleDeleteSecret(req, res, secretDeleteMatch[1]);
     }
 
     // Log routes

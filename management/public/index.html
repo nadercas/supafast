@@ -117,6 +117,7 @@
   <div class="tab" data-tab="backups">Backups</div>
   <div class="tab" data-tab="security">Security</div>
   <div class="tab" data-tab="logs">Logs</div>
+  <div class="tab" data-tab="secrets">Secrets</div>
 </div>
 
 <div class="content">
@@ -205,6 +206,30 @@ restic restore &lt;snapshot-id&gt; --target "$RESTORE_DIR"</pre>
       <table>
         <thead><tr><th>IP Address</th><th>Ban Time</th></tr></thead>
         <tbody id="fail2banTable"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Secrets -->
+  <div class="panel" id="panel-secrets">
+    <h3 class="section-title">Edge Function Secrets</h3>
+    <div class="card mb-16">
+      <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
+        <div style="flex:1;min-width:160px">
+          <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:4px">Key</label>
+          <input id="secretKey" type="text" placeholder="e.g. STRIPE_SECRET_KEY" spellcheck="false" style="width:100%;padding:8px 10px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text);font-family:inherit;font-size:13px">
+        </div>
+        <div style="flex:1;min-width:160px">
+          <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:4px">Value</label>
+          <input id="secretValue" type="password" placeholder="Secret value" style="width:100%;padding:8px 10px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text);font-family:inherit;font-size:13px">
+        </div>
+        <button class="btn btn-green" onclick="addSecret()">Add</button>
+      </div>
+    </div>
+    <div class="card" style="padding:0;overflow:hidden">
+      <table>
+        <thead><tr><th>Key Name</th><th style="width:100px">Actions</th></tr></thead>
+        <tbody id="secretsTable"></tbody>
       </table>
     </div>
   </div>
@@ -541,6 +566,52 @@ async function loadSecurity() {
   }
 }
 
+// --- Secrets ---
+async function loadSecrets() {
+  const data = await api('/api/secrets');
+  if (!data) return;
+  const tbody = document.getElementById('secretsTable');
+  if (data.keys.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="2" class="text-muted">No secrets configured</td></tr>';
+  } else {
+    tbody.innerHTML = data.keys.map(k => `
+      <tr>
+        <td class="mono">${escapeHtml(k)}</td>
+        <td><button class="btn btn-sm btn-red" onclick="deleteSecret('${escapeHtml(k)}')">Delete</button></td>
+      </tr>
+    `).join('');
+  }
+}
+
+async function addSecret() {
+  const keyEl = document.getElementById('secretKey');
+  const valEl = document.getElementById('secretValue');
+  const key = keyEl.value.trim();
+  const value = valEl.value;
+  if (!key) { toast('Key name is required', 'error'); return; }
+  if (!value) { toast('Value is required', 'error'); return; }
+  const data = await api('/api/secrets', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ key, value })
+  });
+  if (data && data.success) {
+    toast(`Secret '${key}' ${data.action}` + (data.restarted ? ' — runtime restarted' : ''), 'success');
+    keyEl.value = '';
+    valEl.value = '';
+    loadSecrets();
+  }
+}
+
+async function deleteSecret(key) {
+  if (!confirm('Delete secret "' + key + '"?')) return;
+  const data = await api('/api/secrets/' + encodeURIComponent(key), { method: 'DELETE' });
+  if (data && data.success) {
+    toast(`Secret '${key}' deleted` + (data.restarted ? ' — runtime restarted' : ''), 'success');
+    loadSecrets();
+  }
+}
+
 // --- Logs ---
 async function loadDeployLog() {
   const data = await api('/api/logs/deploy');
@@ -576,6 +647,9 @@ function loadTab(tab) {
     case 'logs':
       loadDeployLog();
       loadBackupLog();
+      break;
+    case 'secrets':
+      loadSecrets();
       break;
   }
 }

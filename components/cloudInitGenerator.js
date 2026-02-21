@@ -1414,6 +1414,8 @@ services:
     depends_on:
       analytics:
         condition: service_healthy
+    env_file:
+      - ./volumes/functions/.env
     environment:
       JWT_SECRET: \${JWT_SECRET}
       SUPABASE_URL: http://kong:8000
@@ -1634,6 +1636,7 @@ services:
       - /var/log:/host-logs:ro
       - ./backup.env:/app/backup.env:ro
       - .:/supabase:ro
+      - ./volumes/functions/.env:/supabase/volumes/functions/.env
     expose:
       - "3001"
     depends_on:
@@ -2211,6 +2214,7 @@ update_status "hardening_done"
 update_status "supabase"
 
 mkdir -p /opt/supabase/docker/volumes/{api,db/init,logs,pooler,functions/main,functions/hello,caddy/snippets,storage,snippets,redis}
+touch /opt/supabase/docker/volumes/functions/.env
 ${enableAuthelia ? 'mkdir -p /opt/supabase/docker/volumes/authelia' : ''}
 cd /opt/supabase/docker
 
