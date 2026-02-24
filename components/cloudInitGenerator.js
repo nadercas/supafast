@@ -1610,8 +1610,8 @@ services:
     environment:
       LOG_LEVEL: warning
       CONTAINERS: 1
-      IMAGES: 1
-      POST: 1
+      IMAGES: 0
+      POST: 0
       ALLOW_START: 1
       ALLOW_STOP: 1
       ALLOW_RESTARTS: 1
@@ -1948,6 +1948,8 @@ set -euo pipefail
 exec > /var/log/supabase-deploy.log 2>&1
 
 # ── Status reporter: updates this server's labels via Hetzner API ──
+# NOTE: The token is embedded in user_data which is readable from the VM's metadata
+# service. It is cleaned up from logs and env after deployment completes or fails.
 HETZNER_TOKEN="${config.hetznerCloudToken}"
 SERVER_ID=$(curl -s http://169.254.169.254/hetzner/v1/metadata/instance-id 2>/dev/null || echo "")
 update_status() {
@@ -1959,7 +1961,15 @@ update_status() {
   fi
 }
 
-trap 'update_status "failed"' ERR
+cleanup_secrets() {
+  unset HETZNER_TOKEN
+  sed -i "s/HETZNER_TOKEN=\\"[^\\"]*\\"/HETZNER_TOKEN=\\"REDACTED\\"/g" /var/log/supabase-deploy.log
+  sed -i "s/Bearer [a-zA-Z0-9]*/Bearer REDACTED/g" /var/log/supabase-deploy.log
+  sed -i "s/AWS_ACCESS_KEY_ID=[^ ]*/AWS_ACCESS_KEY_ID=REDACTED/g" /var/log/supabase-deploy.log
+  sed -i "s/AWS_SECRET_ACCESS_KEY=[^ ]*/AWS_SECRET_ACCESS_KEY=REDACTED/g" /var/log/supabase-deploy.log
+}
+
+trap 'update_status "failed"; cleanup_secrets' ERR
 
 update_status "starting"
 
@@ -2564,11 +2574,7 @@ sshd -t && systemctl restart ssh
 update_status "complete"
 
 # ── Security cleanup: wipe secrets from memory and logs ──
-unset HETZNER_TOKEN
-sed -i "s/Bearer [a-zA-Z0-9]*/Bearer REDACTED/g" /var/log/supabase-deploy.log
-sed -i "s/HETZNER_TOKEN=\\"[^\\"]*\\"/HETZNER_TOKEN=\\"REDACTED\\"/g" /var/log/supabase-deploy.log
-sed -i "s/AWS_ACCESS_KEY_ID=[^ ]*/AWS_ACCESS_KEY_ID=REDACTED/g" /var/log/supabase-deploy.log
-sed -i "s/AWS_SECRET_ACCESS_KEY=[^ ]*/AWS_SECRET_ACCESS_KEY=REDACTED/g" /var/log/supabase-deploy.log
+cleanup_secrets
 
 echo "DEPLOY_COMPLETED_AT:$(date -Iseconds)"
 `;

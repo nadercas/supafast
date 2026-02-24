@@ -547,10 +547,7 @@ export default function SupabaseDeployer() {
       log(`Server created! ID: ${server.id}`, "success");
       if (ip) log(`Public IP: ${ip}`, "success");
 
-      // Now update the cloud-init won't work retroactively, but the server
-      // can discover its own ID via the Hetzner metadata service
-      // Update cloud-init to use metadata endpoint instead
-      // Actually — we update the server labels directly to inject the ID
+      // Set initial deploy labels for progress tracking
       await client.updateServerLabels(server.id, {
         deploy_phase: "provisioning",
         managed_by: "supabase-deploy",
@@ -568,7 +565,7 @@ export default function SupabaseDeployer() {
 
       // 7. Poll deployment progress via server labels
       log("Server is executing the deployment script...");
-      log("  Tracking progress via Hetzner server labels (zero-knowledge)");
+      log("  Tracking progress via Hetzner server labels");
 
       const pollResult = await client.pollDeployStatus(server.id, (info) => {
         log(info.label, info.type || "info");
@@ -579,7 +576,7 @@ export default function SupabaseDeployer() {
         throw new Error("Deployment failed on the server. SSH in and check /var/log/supabase-deploy.log");
       }
 
-      // 8. Clean up: remove the API token from server labels
+      // 8. Clean up deploy labels
       try {
         await client.updateServerLabels(server.id, {
           deploy_phase: pollResult === "complete" ? "complete" : "unknown",
@@ -726,6 +723,11 @@ export default function SupabaseDeployer() {
           <div style={S.badge}>
             <div style={{ width: 6, height: 6, borderRadius: "50%", background: C.green }} />
             zero-knowledge · open source
+            <a href="https://github.com/nadercas/supafast" target="_blank" rel="noopener noreferrer"
+              style={{ color: C.dim, display: "flex", alignItems: "center", transition: "color 0.15s" }}
+              onMouseEnter={(e) => e.currentTarget.style.color = C.text} onMouseLeave={(e) => e.currentTarget.style.color = C.dim}>
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.531 1.032 1.531 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z"/></svg>
+            </a>
           </div>
         </div>
       </header>
@@ -1249,6 +1251,13 @@ export default function SupabaseDeployer() {
               <Card style={{ background: "#1a0c0c", borderColor: "#3a1a1a", color: "#fca5a5", fontSize: 12, lineHeight: 1.7, padding: "14px 16px" }}>
                 <strong>⚠ Save these credentials NOW!</strong> They exist only in browser memory.
                 Once you close this tab, they are gone forever. Use a password manager.
+              </Card>
+
+              <Card style={{ background: "#1a1710", borderColor: "#3a3020", color: "#d4a044", fontSize: 12, lineHeight: 1.7, padding: "14px 16px" }}>
+                <strong>⚠ Revoke your Hetzner API token.</strong> Your token is embedded in the server&apos;s
+                cloud-init user_data, which stays readable from the VM&apos;s metadata service. Go to{" "}
+                <strong>Hetzner Console &rarr; Security &rarr; API Tokens</strong> and delete the token
+                you used for this deployment. Your server will continue running normally without it.
               </Card>
 
               <Card style={{ background: "#1a1710", borderColor: "#3a3020", color: "#d4a044", fontSize: 12, lineHeight: 1.7, padding: "14px 16px", marginBottom: 14 }}>

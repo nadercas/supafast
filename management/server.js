@@ -596,6 +596,14 @@ const server = http.createServer(async (req, res) => {
   const method = req.method;
 
   try {
+    // CSRF protection: require X-Requested-With header on all mutating requests
+    if (['POST', 'PUT', 'DELETE', 'PATCH'].includes(method)) {
+      if (req.headers['x-requested-with'] !== 'XMLHttpRequest') {
+        res.writeHead(403, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: 'Forbidden: missing required header' }));
+      }
+    }
+
     // API routes
     if (urlPath === '/api/system' && method === 'GET') {
       return handleSystem(req, res);

@@ -300,6 +300,7 @@ function toast(msg, type = 'info') {
 const BASE_PATH = window.location.pathname.replace(/\/[^/]*$/, '').replace(/\/$/, '');
 async function api(url, opts = {}) {
   try {
+    opts.headers = { 'X-Requested-With': 'XMLHttpRequest', ...opts.headers };
     const res = await fetch(BASE_PATH + url, opts);
     const data = await res.json();
     if (!res.ok) {
