@@ -1261,9 +1261,7 @@ export default function SupabaseDeployer() {
               </Card>
 
               <Card style={{ background: "#1a1710", borderColor: "#3a3020", color: "#d4a044", fontSize: 12, lineHeight: 1.7, padding: "14px 16px", marginBottom: 14 }}>
-                <strong>Using Cloudflare?</strong> Set SSL mode to <strong>Full</strong> (not Full Strict) in
-                Cloudflare dashboard → SSL/TLS. Or use <strong>DNS-only mode</strong> (grey cloud icon)
-                so Caddy can get its own Let&apos;s Encrypt certificate directly.
+                <strong>DNS setup order matters.</strong> Point your A record to the server IP with the proxy <strong>disabled</strong> (DNS-only / grey cloud in Cloudflare) first. Caddy needs a direct connection to issue the Let&apos;s Encrypt certificate — this takes 1–2 minutes. Once your domain loads over HTTPS, you can enable the Cloudflare proxy and switch SSL mode to <strong>Full Strict</strong>.
               </Card>
 
               <SectionLabel>Claude MCP Integration</SectionLabel>
