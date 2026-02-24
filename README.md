@@ -277,6 +277,7 @@ Everything else — Studio, SQL editor, Auth, Storage, Edge Functions, Realtime 
 
 - **[supabase-automated-self-host](https://github.com/singh-inder/supabase-automated-self-host)** by singh-inder — foundation for the Supabase docker-compose configuration
 - **[mcp-supabase-self-hosted](https://github.com/ninedotdev/mcp-supabase-self-hosted)** by ninedotdev — original 37-tool MCP server implementation that made full Supabase MCP integration possible
+- **[docker-socket-proxy](https://github.com/Tecnativa/docker-socket-proxy)** by Tecnativa — Docker API proxy that restricts socket access to only the operations the management panel needs
 - **[restic](https://restic.net/)** — encrypted backup engine
 - **[Caddy](https://caddyserver.com/)** — automatic HTTPS
 - **[Authelia](https://www.authelia.com/)** — 2FA / SSO
