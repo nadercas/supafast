@@ -2371,6 +2371,7 @@ systemctl enable --now supabase-functions-reload.path
 # PHASE 3: S3 BACKUP SETUP
 # ═══════════════════════════════════════════════════════════════════════════════
 set +e
+trap - ERR
 update_status "s3_backup"
 
 S3_REPO="s3:s3.${s3Region}.amazonaws.com/${s3Bucket}/${serverName}"
@@ -2553,6 +2554,7 @@ chown -R "${deployUser}:${deployUser}" "$MCP_DIR" "/home/${deployUser}/bin"
 cd /opt/supabase/docker
 
 set -e
+trap 'update_status "failed"; cleanup_secrets' ERR
 
 # ── SSH Hardening (Phase 2: full lockdown) ──
 cat > /etc/ssh/sshd_config.d/99-hardening.conf <<SSHCONF_FINAL
