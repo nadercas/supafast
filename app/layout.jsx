@@ -26,7 +26,14 @@ export const metadata = {
     title: "SupaFast — Self-Host Supabase in 10 Minutes",
     description:
       "Production-hardened Supabase deployment with encrypted S3 backups, Authelia 2FA, and Claude MCP integration. All secrets stay in your browser.",
-    images: ["/api/og"],
+    images: [
+      {
+        url: "https://supafast.site/api/og",
+        width: 1200,
+        height: 630,
+        alt: "SupaFast — Self-Host Supabase in 10 Minutes",
+      },
+    ],
     creator: "@nadercas",
   },
 };

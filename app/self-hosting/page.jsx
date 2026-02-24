@@ -216,7 +216,7 @@ pm2 save`}</Code>
 
         <Section title="Customization">
           <div style={{ fontSize: 12, color: C.muted, lineHeight: 2 }}>
-            The two files you'll most likely want to edit:
+            The two files you&apos;ll most likely want to edit:
           </div>
           <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 8 }}>
             {[
@@ -235,7 +235,7 @@ pm2 save`}</Code>
 
         <Section title="Architecture">
           <p style={{ fontSize: 12, color: C.muted, lineHeight: 1.8, margin: "0 0 16px" }}>
-            SupaFast has a zero-backend architecture. Here's the complete data flow:
+            SupaFast has a zero-backend architecture. Here&apos;s the complete data flow:
           </p>
           <Code block>{`Browser (your machine)
   │
@@ -255,7 +255,7 @@ pm2 save`}</Code>
               └── Phase 5: MCP server (Claude/Cursor integration)`}</Code>
           <Note>
             SupaFast itself never sees your Hetzner token, Supabase secrets, or S3 credentials.
-            All API calls are visible in your browser's Network tab.
+            All API calls are visible in your browser&apos;s Network tab.
           </Note>
         </Section>
 
