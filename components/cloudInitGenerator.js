@@ -2286,6 +2286,9 @@ cat > volumes/caddy/snippets/cors.conf <<'CORS_EOF'
 ${corsConf}
 CORS_EOF
 
+# ── Create placeholder files before docker compose creates them as directories ──
+touch backup.env
+
 # ── Pull and start ──
 update_status "pulling"
 for attempt in 1 2 3; do
