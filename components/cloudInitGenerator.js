@@ -1023,6 +1023,7 @@ psql -v ON_ERROR_STOP=1 -U postgres -d "$POSTGRES_DB" -c "CREATE SCHEMA IF NOT E
 export function generateEnvFile(config, secrets) {
   const {
     domain, serverName, supabaseEmail,
+    enableS3Backups,
     smtpHost, smtpPort, smtpUser, smtpPass, smtpSenderName, smtpAdminEmail,
     siteUrl, additionalRedirectUrls,
   } = config;
@@ -1134,13 +1135,13 @@ MINIO_ROOT_PASSWORD=${secrets.minioRootPassword}
 # Server
 ############
 SERVER_NAME=${config.serverName}
-
+${enableS3Backups ? `
 ############
 # Backups (S3)
 ############
 RESTIC_REPOSITORY=s3:s3.${config.s3Region}.amazonaws.com/${config.s3Bucket}/${config.serverName}
 AWS_ACCESS_KEY_ID=${config.s3AccessKey}
-AWS_SECRET_ACCESS_KEY=${config.s3SecretKey}
+AWS_SECRET_ACCESS_KEY=${config.s3SecretKey}` : ''}
 `;
 }
 
@@ -1649,10 +1650,10 @@ services:
       DOCKER_HOST: tcp://docker-socket-proxy:2375
       SUPABASE_DIR: /supabase
       SERVER_NAME: \${SERVER_NAME}
-      RESTIC_REPOSITORY: \${RESTIC_REPOSITORY}
+      ${config.enableS3Backups ? `RESTIC_REPOSITORY: \${RESTIC_REPOSITORY}
       RESTIC_PASSWORD: \${RESTIC_PASSWORD}
       AWS_ACCESS_KEY_ID: \${AWS_ACCESS_KEY_ID}
-      AWS_SECRET_ACCESS_KEY: \${AWS_SECRET_ACCESS_KEY}`;
+      AWS_SECRET_ACCESS_KEY: \${AWS_SECRET_ACCESS_KEY}` : ''}`;
 
   // Conditional: Authelia
   if (enableAuthelia) {
@@ -1894,6 +1895,7 @@ export async function generateCloudInit(config, secrets) {
   const {
     serverName, deployUser, domain, supabaseUser, supabasePassword,
     supabaseEmail, displayName, enableAuthelia, enableRedis,
+    enableS3Backups,
     s3Bucket, s3Region, s3AccessKey, s3SecretKey,
     healthcheckUrl,
     smtpHost, smtpPort, smtpUser, smtpPass, smtpSenderName, smtpAdminEmail,
@@ -2373,6 +2375,7 @@ systemctl enable --now supabase-functions-reload.path
 # ═══════════════════════════════════════════════════════════════════════════════
 # PHASE 3: S3 BACKUP SETUP
 # ═══════════════════════════════════════════════════════════════════════════════
+${enableS3Backups ? `
 set +e
 trap - ERR
 update_status "s3_backup"
@@ -2507,6 +2510,9 @@ $LOG {
     create 640 root root
 }
 LOGROT
+` : `
+update_status "backup_skipped"
+`}
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # PHASE 4: MCP SERVER SETUP

@@ -344,6 +344,7 @@ class HetznerClient {
       s3_backup: { label: "Configuring S3 backup...", pct: 91 },
       backup_init: { label: "Initializing restic backup repository...", pct: 94 },
       backup_first: { label: "Running first backup...", pct: 95 },
+      backup_skipped: { label: "S3 backups disabled, skipping backup setup.", pct: 95 },
       mcp_setup: { label: "Setting up MCP server (Claude integration)...", pct: 97 },
       complete: { label: "🎉 Deployment complete!", pct: 100, type: "success" },
       failed: { label: "Deployment failed on the server", pct: 0, type: "error" },
@@ -425,6 +426,7 @@ export default function SupabaseDeployer() {
     displayName: "",
     enableAuthelia: true,
     enableRedis: true,
+    enableS3Backups: true,
     s3Bucket: "",
     s3Region: "us-east-1",
     s3AccessKey: "",
@@ -631,9 +633,14 @@ export default function SupabaseDeployer() {
         config.supabasePassword.length >= 8 &&
         config.supabaseEmail.includes("@") &&
         config.displayName.length > 0 &&
-        config.s3Bucket.length > 0 &&
-        config.s3AccessKey.length > 0 &&
-        config.s3SecretKey.length > 0
+        (
+          !config.enableS3Backups ||
+          (
+            config.s3Bucket.length > 0 &&
+            config.s3AccessKey.length > 0 &&
+            config.s3SecretKey.length > 0
+          )
+        )
       );
       case 3: return true;
       case 4: return status === "success";
@@ -661,11 +668,19 @@ export default function SupabaseDeployer() {
       `SERVICE_ROLE_KEY=${secrets.serviceRoleKey}`,
       `POSTGRES_PASSWORD=${secrets.postgresPassword}`,
       ``,
-      `## Backup`,
-      `RESTIC_PASSWORD=${secrets.resticPassword}`,
-      `S3_BUCKET=${config.s3Bucket}`,
-      `S3_REGION=${config.s3Region}`,
-      ``,
+      ...(config.enableS3Backups
+        ? [
+          `## Backup`,
+          `RESTIC_PASSWORD=${secrets.resticPassword}`,
+          `S3_BUCKET=${config.s3Bucket}`,
+          `S3_REGION=${config.s3Region}`,
+          ``,
+        ]
+        : [
+          `## Backup`,
+          `S3 backups disabled for this deployment`,
+          ``,
+        ]),
       `## SMTP`,
       `SMTP_HOST=${config.smtpHost || "(not configured)"}`,
       `SMTP_USER=${config.smtpUser}`,
@@ -971,6 +986,11 @@ export default function SupabaseDeployer() {
                   set={(v) => update("enableRedis", v)}
                   disabled={!config.enableAuthelia}
                 />
+                <Toggle
+                  label="S3 Backups"
+                  on={config.enableS3Backups}
+                  set={(v) => update("enableS3Backups", v)}
+                />
               </div>
               {!config.enableAuthelia && (
                 <div style={{ fontSize: 11, color: C.dim, marginTop: -8, marginBottom: 16 }}>
@@ -979,26 +999,34 @@ export default function SupabaseDeployer() {
               )}
 
               <SectionLabel>AWS S3 (Backups)</SectionLabel>
-              <Card style={{ background: "#0c1a14", borderColor: "#1a3a28", color: "#6ee7b7", fontSize: 12, lineHeight: 1.7, padding: "12px 16px", marginBottom: 14 }}>
-                <strong>Encrypted backups to S3.</strong> Each deployment backs up to its own
-                prefix (<code style={{ background: "#1a3a28", padding: "1px 5px", borderRadius: 3 }}>s3://your-bucket/{config.serverName || "server-name"}</code>).
-                Reuse the same bucket for multiple servers — backups are isolated by server name with separate encryption keys.
-                <div style={{ marginTop: 8, paddingTop: 8, borderTop: "1px solid #1a3a28", fontSize: 11, color: "#4ade80" }}>
-                  <strong>Setup:</strong> Create an S3 bucket and an IAM user with <strong>s3:PutObject, s3:GetObject, s3:ListBucket, s3:DeleteObject</strong> permissions on the bucket.
-                </div>
-              </Card>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-                <Field label="S3 Bucket Name" value={config.s3Bucket} onChange={(v) => update("s3Bucket", v)} placeholder="my-supabase-backups" />
-                <Field label="AWS Region" value={config.s3Region} onChange={(v) => update("s3Region", v)} placeholder="us-east-1" />
-              </div>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-                <Field label="AWS Access Key ID" value={config.s3AccessKey} onChange={(v) => update("s3AccessKey", v)} placeholder="AKIA..." />
-                <Field label="AWS Secret Access Key" type="password" value={config.s3SecretKey} onChange={(v) => update("s3SecretKey", v)} placeholder="Your secret key" />
-              </div>
-              <Field label="Health-check URL (optional)" value={config.healthcheckUrl} onChange={(v) => update("healthcheckUrl", v)}
-                placeholder="https://hc-ping.com/your-uuid"
-                hint="healthchecks.io, ntfy.sh, or similar — pinged after each backup"
-              />
+              {config.enableS3Backups ? (
+                <>
+                  <Card style={{ background: "#0c1a14", borderColor: "#1a3a28", color: "#6ee7b7", fontSize: 12, lineHeight: 1.7, padding: "12px 16px", marginBottom: 14 }}>
+                    <strong>Encrypted backups to S3.</strong> Each deployment backs up to its own
+                    prefix (<code style={{ background: "#1a3a28", padding: "1px 5px", borderRadius: 3 }}>s3://your-bucket/{config.serverName || "server-name"}</code>).
+                    Reuse the same bucket for multiple servers — backups are isolated by server name with separate encryption keys.
+                    <div style={{ marginTop: 8, paddingTop: 8, borderTop: "1px solid #1a3a28", fontSize: 11, color: "#4ade80" }}>
+                      <strong>Setup:</strong> Create an S3 bucket and an IAM user with <strong>s3:PutObject, s3:GetObject, s3:ListBucket, s3:DeleteObject</strong> permissions on the bucket.
+                    </div>
+                  </Card>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                    <Field label="S3 Bucket Name" value={config.s3Bucket} onChange={(v) => update("s3Bucket", v)} placeholder="my-supabase-backups" />
+                    <Field label="AWS Region" value={config.s3Region} onChange={(v) => update("s3Region", v)} placeholder="us-east-1" />
+                  </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                    <Field label="AWS Access Key ID" value={config.s3AccessKey} onChange={(v) => update("s3AccessKey", v)} placeholder="AKIA..." />
+                    <Field label="AWS Secret Access Key" type="password" value={config.s3SecretKey} onChange={(v) => update("s3SecretKey", v)} placeholder="Your secret key" />
+                  </div>
+                  <Field label="Health-check URL (optional)" value={config.healthcheckUrl} onChange={(v) => update("healthcheckUrl", v)}
+                    placeholder="https://hc-ping.com/your-uuid"
+                    hint="healthchecks.io, ntfy.sh, or similar — pinged after each backup"
+                  />
+                </>
+              ) : (
+                <Card style={{ background: "#1a1710", borderColor: "#3a3020", color: "#d4a044", fontSize: 12, lineHeight: 1.7, padding: "12px 16px", marginBottom: 14 }}>
+                  S3 backups are disabled. No backup script, cron job, or S3 credentials will be configured.
+                </Card>
+              )}
 
               <SectionLabel>SMTP (Transactional Email)</SectionLabel>
               <Card style={{ background: "#0c0f1a", borderColor: "#1a2040", color: "#93c5fd", fontSize: 12, lineHeight: 1.7, padding: "12px 16px", marginBottom: 14 }}>
@@ -1033,7 +1061,7 @@ export default function SupabaseDeployer() {
                   ["Proxy", "Caddy (auto-TLS via Let's Encrypt)"],
                   ["Auth", config.enableAuthelia ? `Authelia 2FA (user: ${config.supabaseUser})` : `Basic Auth (user: ${config.supabaseUser})`],
                   ["Redis", config.enableRedis ? "Enabled (session store)" : "Disabled"],
-                  ["Backups", `Restic → S3 (${config.s3Bucket} in ${config.s3Region}), daily 3 AM, encrypted`],
+                  ["Backups", config.enableS3Backups ? `Restic -> S3 (${config.s3Bucket} in ${config.s3Region}), daily 3 AM, encrypted` : "Disabled"],
                   ["SMTP", config.smtpHost ? `${config.smtpHost}:${config.smtpPort} (${config.smtpSenderName || config.smtpUser})` : "Not configured — email auto-confirm enabled"],
                   ["SSH Access", `User: ${config.deployUser} (root login disabled, key generated in browser)`],
                   ["Management", `${config.domain}/admin/ (protected by ${config.enableAuthelia ? 'Authelia' : 'Basic Auth'})`],
@@ -1206,8 +1234,12 @@ export default function SupabaseDeployer() {
                   ["Anon Key", secrets?.anonKey],
                   ["Service Role Key", secrets?.serviceRoleKey],
                   ["Postgres Password", secrets?.postgresPassword],
-                  ["Restic Backup Password", secrets?.resticPassword],
-                  ["S3 Backup Bucket", `${config.s3Bucket} (${config.s3Region})`],
+                  ...(config.enableS3Backups
+                    ? [
+                      ["Restic Backup Password", secrets?.resticPassword],
+                      ["S3 Backup Bucket", `${config.s3Bucket} (${config.s3Region})`],
+                    ]
+                    : [["Backups", "Disabled"]]),
                   ...(config.enableAuthelia ? [["2FA Secret (TOTP)", secrets?.totpSecret]] : []),
                 ].map(([k, v], i, arr) => (
                   <div key={k} style={{
@@ -1325,7 +1357,7 @@ export default function SupabaseDeployer() {
                 4. Visit <strong style={{ color: C.green }}>{config.domain}</strong> and log in<br />
                 5. SSH: <code style={{ background: C.surfaceAlt, padding: "1px 5px", borderRadius: 3 }}>ssh -i ~/.ssh/{config.serverName} {config.deployUser}@{serverIp}</code><br />
                 6. Management panel: <strong style={{ color: C.green }}>{config.domain}/admin/</strong><br />
-                7. Backups run automatically to S3 (daily 3 AM)<br />
+                7. {config.enableS3Backups ? "Backups run automatically to S3 (daily 3 AM)" : "Backups are disabled for this deployment"}<br />
                 8. Copy the MCP config above into <code style={{ background: C.surfaceAlt, padding: "1px 5px", borderRadius: 3 }}>~/.claude/mcp.json</code> to connect Claude
               </div>
               {config.enableAuthelia && (
@@ -1486,3 +1518,4 @@ function Field({ label, value, onChange, placeholder, hint, error, type = "text"
     </div>
   );
 }
+
