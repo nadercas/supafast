@@ -15,13 +15,15 @@ const AUDIT_LOG_PATH = path.join(UPGRADE_DIR, 'audit.log');
 
 // Simple in-memory sliding-window rate limiter.
 // Keyed by authenticated user (Remote-User) falling back to IP.
-// Two buckets: read (120/min), mutate (10/min).
+// Read limit sized for UI polling: dashboard refreshes every 5s with 3
+// parallel calls (≈36/min) and upgrade polling is 20/min — 600/min gives
+// ample headroom while still blocking scraping.
 const rateBuckets = new Map();
 function rateLimit(req, method) {
   const key = (req.headers['remote-user'] || req.socket.remoteAddress || 'anon').toLowerCase();
   const now = Date.now();
   const isMutate = ['POST', 'PUT', 'DELETE', 'PATCH'].includes(method);
-  const limit = isMutate ? 10 : 120;
+  const limit = isMutate ? 30 : 600;
   const windowMs = 60_000;
   const bucketKey = key + '|' + (isMutate ? 'm' : 'r');
   const bucket = rateBuckets.get(bucketKey) || [];
