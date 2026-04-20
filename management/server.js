@@ -875,8 +875,25 @@ async function handleUpgradeCurrent(req, res) {
   const services = {};
   for (const svc of UPGRADABLE_SERVICES) {
     const img = env.get(imageEnvKey(svc)) || '';
-    const tag = img.includes(':') ? img.split(':').slice(1).join(':') : '';
-    services[svc] = { image: img, tag, repo: SERVICE_TO_REPO[svc] };
+    const repo = SERVICE_TO_REPO[svc];
+    let tag = '';
+    if (img.includes('@sha256:')) {
+      try {
+        const cname = containerNameFor(svc);
+        const cj = await dockerRequest('GET', `/containers/${encodeURIComponent(cname)}/json`);
+        const imgId = cj.status === 200 && cj.data && cj.data.Image;
+        if (imgId) {
+          const ij = await dockerRequest('GET', `/images/${imgId}/json`);
+          const tagList = ij.status === 200 && ij.data && ij.data.RepoTags || [];
+          const match = tagList.find((t) => t.startsWith(repo + ':') && !t.endsWith(':<none>'));
+          if (match) tag = match.split(':').slice(1).join(':');
+        }
+      } catch {}
+      if (!tag) tag = 'pinned@' + img.split('@sha256:')[1].slice(0, 12);
+    } else if (img.includes(':')) {
+      tag = img.split(':').slice(1).join(':');
+    }
+    services[svc] = { image: img, tag, repo };
   }
   sendJson(res, { services });
 }
