@@ -293,7 +293,7 @@ restic restore &lt;snapshot-id&gt; --target "$RESTORE_DIR"</pre>
     </div>
     <div class="card" style="padding:0;overflow:hidden">
       <table>
-        <thead><tr><th style="width:150px">When</th><th style="width:90px">User</th><th style="width:170px">Location</th><th style="width:140px">Device</th><th style="width:150px">Action</th><th>Target</th><th style="width:80px">Result</th></tr></thead>
+        <thead><tr><th style="width:150px">When</th><th style="width:90px">User</th><th style="width:130px">IP</th><th style="width:140px">Device</th><th style="width:150px">Action</th><th>Target</th><th style="width:80px">Result</th></tr></thead>
         <tbody id="auditTable"><tr><td colspan="5" style="color:var(--muted);padding:12px">Click Refresh to load</td></tr></tbody>
       </table>
     </div>
@@ -810,12 +810,11 @@ async function loadAudit() {
   }
   tbody.innerHTML = data.entries.map(e => {
     const color = e.result === 'ok' || e.result === 'queued' ? 'var(--green)' : e.result === 'error' || e.result === 'fail' ? 'var(--red)' : 'var(--muted)';
-    const loc = [e.city, e.country].filter(Boolean).join(', ');
     const dev = [e.browser, e.device].filter(Boolean).join(' / ');
     return `<tr>
       <td style="font-size:12px">${escapeHtml(new Date(e.ts).toLocaleString())}</td>
       <td class="mono">${escapeHtml(e.user || '')}</td>
-      <td style="font-size:12px">${escapeHtml(loc || '—')}<br><span class="mono" style="font-size:11px;color:var(--muted)">${escapeHtml(e.ip || '')}</span></td>
+      <td class="mono" style="font-size:12px">${escapeHtml(e.ip || '—')}</td>
       <td style="font-size:12px">${escapeHtml(dev || '—')}</td>
       <td class="mono" style="font-size:12px">${escapeHtml(e.action)}</td>
       <td class="mono" style="font-size:12px;word-break:break-all">${escapeHtml(e.target || '')}</td>
