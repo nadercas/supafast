@@ -1032,24 +1032,38 @@ function readInitialKeyFromEnv() {
 }
 
 function handleMcp(req, res) {
-  const serverName = SERVER_NAME || process.env.SERVER_NAME || 'supabase';
+  const serverName = SERVER_NAME || 'supabase';
   const deployUser = process.env.DEPLOY_USER || 'nader';
-  const url = process.env.SUPABASE_PUBLIC_URL || '';
-  const host = url.replace(/^https?:\/\//, '').replace(/\/$/, '');
-  const config = {
-    mcpServers: {
-      [`supabase-${serverName}`]: {
-        command: 'ssh',
-        args: [
-          '-i', `~/.ssh/${serverName}`,
-          '-o', 'StrictHostKeyChecking=accept-new',
-          `${deployUser}@${host}`,
-          `/home/${deployUser}/bin/supabase-mcp`,
-        ],
+  const http2 = require('http');
+  const metaReq = http2.get(
+    { host: '169.254.169.254', path: '/hetzner/v1/metadata/public-ipv4', timeout: 2000 },
+    (r) => {
+      let ip = '';
+      r.on('data', (c) => (ip += c));
+      r.on('end', () => buildMcpResponse(ip.trim()));
+    }
+  );
+  metaReq.on('error', () => buildMcpResponse(''));
+  metaReq.on('timeout', () => { metaReq.destroy(); buildMcpResponse(''); });
+
+  function buildMcpResponse(ip) {
+    const target = ip || process.env.SUPABASE_PUBLIC_URL || '';
+    const host = target.replace(/^https?:\/\//, '').replace(/\/$/, '');
+    const config = {
+      mcpServers: {
+        [`supabase-${serverName}`]: {
+          command: 'ssh',
+          args: [
+            '-i', `~/.ssh/${serverName}`,
+            '-o', 'StrictHostKeyChecking=accept-new',
+            `${deployUser}@${host}`,
+            `/home/${deployUser}/bin/supabase-mcp`,
+          ],
+        },
       },
-    },
-  };
-  sendJson(res, { serverName, deployUser, host, config });
+    };
+    sendJson(res, { serverName, deployUser, host, config });
+  }
 }
 
 function handleKeysCurrent(req, res) {
