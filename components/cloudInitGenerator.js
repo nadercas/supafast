@@ -506,6 +506,7 @@ os.replace(tmp, state_path)
 ROTATEPY
 
 chmod 600 "$STATE" "$ENVFILE"
+chmod 644 "$KONGFILE"
 
 echo "[$(ts)] reloading services" >> "$LOG"
 docker compose up -d --no-deps --force-recreate kong auth rest realtime storage >> "$LOG" 2>&1 || true
