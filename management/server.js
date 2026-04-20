@@ -11,6 +11,47 @@ const HOST_LOGS = '/host-logs';
 const HOST_BACKUPS = '/host-backups';
 const UPGRADE_DIR = path.join(SUPABASE_DIR, 'upgrade');
 const PROXY_SECRET = process.env.PROXY_SECRET || '';
+const AUDIT_LOG_PATH = path.join(UPGRADE_DIR, 'audit.log');
+
+// Simple in-memory sliding-window rate limiter.
+// Keyed by authenticated user (Remote-User) falling back to IP.
+// Two buckets: read (120/min), mutate (10/min).
+const rateBuckets = new Map();
+function rateLimit(req, method) {
+  const key = (req.headers['remote-user'] || req.socket.remoteAddress || 'anon').toLowerCase();
+  const now = Date.now();
+  const isMutate = ['POST', 'PUT', 'DELETE', 'PATCH'].includes(method);
+  const limit = isMutate ? 10 : 120;
+  const windowMs = 60_000;
+  const bucketKey = key + '|' + (isMutate ? 'm' : 'r');
+  const bucket = rateBuckets.get(bucketKey) || [];
+  const fresh = bucket.filter((t) => now - t < windowMs);
+  if (fresh.length >= limit) return false;
+  fresh.push(now);
+  rateBuckets.set(bucketKey, fresh);
+  // Opportunistic cleanup so the map doesn't grow unbounded.
+  if (rateBuckets.size > 1000) {
+    for (const [k, v] of rateBuckets) {
+      if (v.length === 0 || now - v[v.length - 1] > windowMs) rateBuckets.delete(k);
+    }
+  }
+  return true;
+}
+
+function audit(req, action, target, result, extra) {
+  try {
+    const entry = {
+      ts: new Date().toISOString(),
+      user: req.headers['remote-user'] || 'unknown',
+      ip: req.socket.remoteAddress || '',
+      action,
+      target: target || '',
+      result: result || 'ok',
+      ...(extra || {}),
+    };
+    fs.appendFileSync(AUDIT_LOG_PATH, JSON.stringify(entry) + '\n');
+  } catch {}
+}
 
 const UPGRADABLE_SERVICES = new Set([
   'studio', 'kong', 'auth', 'rest', 'realtime', 'storage',
@@ -297,6 +338,7 @@ async function handleSetSecret(req, res) {
     const existed = env.has(key);
     env.set(key, value);
     fs.writeFileSync(SECRETS_ENV_PATH, serializeEnvFile(env), 'utf8');
+    audit(req, existed ? 'secret.update' : 'secret.create', key, 'ok');
     // The systemd path unit (supabase-functions-reload.path) detects the file
     // change and runs `docker compose up --force-recreate functions` on the host,
     // which re-reads env_file so the new secret is live in ~5 seconds.
@@ -321,6 +363,7 @@ async function handleDeleteSecret(req, res, key) {
     }
     env.delete(key);
     fs.writeFileSync(SECRETS_ENV_PATH, serializeEnvFile(env), 'utf8');
+    audit(req, 'secret.delete', key, 'ok');
     sendJson(res, { success: true, key, restarted: true });
   } catch (err) {
     sendJson(res, { error: 'Failed to delete secret', details: err.message }, 500);
@@ -421,8 +464,11 @@ async function handleContainerRestart(req, res, containerId) {
   }
   try {
     const result = await dockerRequest('POST', `/containers/${containerId}/restart?t=10`);
-    sendJson(res, { success: result.status === 204, status: result.status });
+    const ok = result.status === 204;
+    audit(req, 'container.restart', containerId.slice(0, 12), ok ? 'ok' : 'fail', { status: result.status });
+    sendJson(res, { success: ok, status: result.status });
   } catch (err) {
+    audit(req, 'container.restart', containerId.slice(0, 12), 'error', { error: err.message });
     sendJson(res, { error: 'Failed to restart container', details: err.message }, 502);
   }
 }
@@ -433,8 +479,11 @@ async function handleContainerStop(req, res, containerId) {
   }
   try {
     const result = await dockerRequest('POST', `/containers/${containerId}/stop?t=10`);
-    sendJson(res, { success: result.status === 204 || result.status === 304, status: result.status });
+    const ok = result.status === 204 || result.status === 304;
+    audit(req, 'container.stop', containerId.slice(0, 12), ok ? 'ok' : 'fail', { status: result.status });
+    sendJson(res, { success: ok, status: result.status });
   } catch (err) {
+    audit(req, 'container.stop', containerId.slice(0, 12), 'error', { error: err.message });
     sendJson(res, { error: 'Failed to stop container', details: err.message }, 502);
   }
 }
@@ -445,8 +494,11 @@ async function handleContainerStart(req, res, containerId) {
   }
   try {
     const result = await dockerRequest('POST', `/containers/${containerId}/start`);
-    sendJson(res, { success: result.status === 204 || result.status === 304, status: result.status });
+    const ok = result.status === 204 || result.status === 304;
+    audit(req, 'container.start', containerId.slice(0, 12), ok ? 'ok' : 'fail', { status: result.status });
+    sendJson(res, { success: ok, status: result.status });
   } catch (err) {
+    audit(req, 'container.start', containerId.slice(0, 12), 'error', { error: err.message });
     sendJson(res, { error: 'Failed to start container', details: err.message }, 502);
   }
 }
@@ -466,8 +518,11 @@ async function handleRestartAll(req, res) {
         results.push({ id: c.Id, name: (c.Names[0] || '').replace(/^\//, ''), success: false, error: err.message });
       }
     }
+    const okCount = results.filter(r => r.success).length;
+    audit(req, 'container.restart-all', '*', 'ok', { total: results.length, ok: okCount });
     sendJson(res, { results });
   } catch (err) {
+    audit(req, 'container.restart-all', '*', 'error', { error: err.message });
     sendJson(res, { error: 'Failed to restart containers', details: err.message }, 502);
   }
 }
@@ -662,9 +717,64 @@ async function handleUpgradeStart(req, res, service) {
     fs.writeFileSync(tmp, JSON.stringify({ id, action: 'upgrade', service, target, at: new Date().toISOString() }));
     fs.renameSync(tmp, reqPath);
 
+    audit(req, 'upgrade.start', service, 'queued', { target, from: fromImage, id });
     sendJson(res, { success: true, id });
   } catch (err) {
     sendJson(res, { error: 'Failed to queue upgrade', details: err.message }, 500);
+  }
+}
+
+// Service→container-name map; matches the map in supabase-upgrade.sh.
+const SERVICE_TO_CONTAINER = {
+  functions: 'supabase-edge-functions',
+  realtime: 'realtime-dev.supabase-realtime',
+  supavisor: 'supabase-pooler',
+};
+function containerNameFor(service) {
+  return SERVICE_TO_CONTAINER[service] || `supabase-${service}`;
+}
+
+async function handleImageDigests(req, res) {
+  // For each upgradable service, returns {service, image, isPinned, digest, shortDigest}.
+  // Digest is the sha256 of the local image (from container .Image). If the
+  // env value contains '@sha256:' we consider it pinned.
+  const out = [];
+  try {
+    const env = readTopEnv();
+    for (const service of UPGRADABLE_SERVICES) {
+      const image = env.get(imageEnvKey(service)) || '';
+      const isPinned = image.includes('@sha256:');
+      let digest = '';
+      try {
+        const cname = containerNameFor(service);
+        const r = await dockerRequest('GET', `/containers/${encodeURIComponent(cname)}/json`);
+        if (r.status === 200 && r.data && r.data.Image) digest = r.data.Image;
+      } catch {}
+      out.push({ service, image, isPinned, digest, shortDigest: digest ? digest.slice(7, 19) : '' });
+    }
+    sendJson(res, { services: out });
+  } catch (e) {
+    sendJson(res, { error: 'Failed to list image digests', details: e.message }, 500);
+  }
+}
+
+async function handleImagePin(req, res) {
+  try {
+    if (!fs.existsSync(UPGRADE_DIR)) return sendJson(res, { error: 'Upgrade directory not mounted' }, 500);
+    const resultPath = path.join(UPGRADE_DIR, 'pin-result.json');
+    if (fs.existsSync(resultPath)) {
+      try { const prev = JSON.parse(fs.readFileSync(resultPath, 'utf8')); if (prev && prev.status === 'pending') return sendJson(res, { error: 'Pin job already in progress' }, 409); } catch {}
+    }
+    const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    fs.writeFileSync(resultPath, JSON.stringify({ id, status: 'pending', at: new Date().toISOString() }));
+    const reqPath = path.join(UPGRADE_DIR, 'pin-request.json');
+    const tmp = reqPath + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify({ id, action: 'pin-digests', at: new Date().toISOString() }));
+    fs.renameSync(tmp, reqPath);
+    audit(req, 'pin-images', 'all', 'queued', { id });
+    sendJson(res, { success: true, id });
+  } catch (e) {
+    sendJson(res, { error: 'Failed to queue pin', details: e.message }, 500);
   }
 }
 
@@ -984,6 +1094,12 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
+    // Rate limit all /api/* (after auth so unauth attacks can't affect legit users)
+    if (urlPath.startsWith('/api/') && !rateLimit(req, method)) {
+      res.writeHead(429, { 'Content-Type': 'application/json', 'Retry-After': '30' });
+      return res.end(JSON.stringify({ error: 'Rate limit exceeded', limit: (['POST','PUT','DELETE','PATCH'].includes(method) ? '10/min' : '120/min') }));
+    }
+
     // API routes
     if (urlPath === '/api/system' && method === 'GET') {
       return handleSystem(req, res);
@@ -1082,6 +1198,28 @@ const server = http.createServer(async (req, res) => {
     const finalizeMatch = urlPath.match(/^\/api\/rotate-keys\/finalize\/([a-f0-9-]+)$/i);
     if (finalizeMatch && method === 'POST') {
       return handleRotateFinalize(req, res, finalizeMatch[1]);
+    }
+
+    // Audit log (read-only tail)
+    if (urlPath === '/api/audit' && method === 'GET') {
+      try {
+        const limit = Math.min(parseInt(query.limit || '200', 10) || 200, 1000);
+        if (!fs.existsSync(AUDIT_LOG_PATH)) return sendJson(res, { entries: [] });
+        const raw = fs.readFileSync(AUDIT_LOG_PATH, 'utf8');
+        const lines = raw.split('\n').filter(Boolean);
+        const entries = lines.slice(-limit).reverse().map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+        return sendJson(res, { entries });
+      } catch (e) {
+        return sendJson(res, { error: 'Failed to read audit log' }, 500);
+      }
+    }
+
+    // Image digest endpoints (for pinning)
+    if (urlPath === '/api/images/digests' && method === 'GET') {
+      return handleImageDigests(req, res);
+    }
+    if (urlPath === '/api/images/pin' && method === 'POST') {
+      return handleImagePin(req, res);
     }
 
     // Log routes

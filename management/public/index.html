@@ -258,10 +258,43 @@ restic restore &lt;snapshot-id&gt; --target "$RESTORE_DIR"</pre>
   <!-- Security -->
   <div class="panel" id="panel-security">
     <h3 class="section-title">Fail2ban - Banned IPs</h3>
-    <div class="card" style="padding:0;overflow:hidden">
+    <div class="card mb-16" style="padding:0;overflow:hidden">
       <table>
         <thead><tr><th>IP Address</th><th>Ban Time</th></tr></thead>
         <tbody id="fail2banTable"></tbody>
+      </table>
+    </div>
+
+    <h3 class="section-title">Image pinning</h3>
+    <div class="card mb-16">
+      <p style="margin:0 0 8px 0;font-size:13px;color:var(--muted)">
+        Pin each service's image by its <code>sha256</code> digest rather than a mutable tag.
+        Prevents a compromised registry from silently shipping a different image on next pull.
+        Current digests are locked in <code>.env</code>; upgrades still work via the Upgrades tab.
+      </p>
+      <div style="display:flex;gap:8px;margin-top:8px">
+        <button class="btn btn-sm" onclick="loadImageDigests()">Refresh</button>
+        <button class="btn btn-sm btn-green" onclick="pinAllImages()">Pin all to current digest</button>
+      </div>
+    </div>
+    <div class="card mb-16" style="padding:0;overflow:hidden">
+      <table>
+        <thead><tr><th>Service</th><th>Image</th><th>Digest</th><th>Pinned?</th></tr></thead>
+        <tbody id="digestsTable"><tr><td colspan="4" style="color:var(--muted);padding:12px">Click Refresh to load</td></tr></tbody>
+      </table>
+    </div>
+
+    <h3 class="section-title">Audit log</h3>
+    <div class="card mb-16">
+      <p style="margin:0 0 8px 0;font-size:13px;color:var(--muted)">
+        Every mutating action (container restart/stop/start, upgrade, secret change, digest pin) is logged with the authenticated user from Authelia.
+      </p>
+      <button class="btn btn-sm" onclick="loadAudit()">Refresh</button>
+    </div>
+    <div class="card" style="padding:0;overflow:hidden">
+      <table>
+        <thead><tr><th style="width:170px">When</th><th style="width:120px">User</th><th style="width:170px">Action</th><th>Target</th><th style="width:90px">Result</th></tr></thead>
+        <tbody id="auditTable"><tr><td colspan="5" style="color:var(--muted);padding:12px">Click Refresh to load</td></tr></tbody>
       </table>
     </div>
   </div>
@@ -734,6 +767,57 @@ async function loadSecurity() {
           <tr><td class="mono">${escapeHtml(b.ip)}</td><td>${escapeHtml(b.time)}</td></tr>
         `).join('');
   }
+  loadImageDigests();
+  loadAudit();
+}
+
+async function loadImageDigests() {
+  const data = await api('/api/images/digests');
+  const tbody = document.getElementById('digestsTable');
+  if (!data || !data.services) {
+    tbody.innerHTML = '<tr><td colspan="4" class="text-muted">Failed to load</td></tr>';
+    return;
+  }
+  tbody.innerHTML = data.services.map(s => `
+    <tr>
+      <td><strong>${escapeHtml(s.service)}</strong></td>
+      <td class="mono" style="font-size:11px;word-break:break-all">${escapeHtml(s.image)}</td>
+      <td class="mono" style="font-size:11px">${escapeHtml(s.shortDigest || '—')}</td>
+      <td>${s.isPinned ? '<span style="color:var(--green)">✓ pinned</span>' : '<span style="color:var(--yellow)">tag</span>'}</td>
+    </tr>
+  `).join('');
+}
+
+async function pinAllImages() {
+  if (!confirm('Pin all service images to their current sha256 digest? This writes to .env and restarts affected services.')) return;
+  const r = await api('/api/images/pin', { method: 'POST' });
+  if (r && r.success) {
+    toast('Pin job queued (id: ' + r.id + ')', 'success');
+    setTimeout(loadImageDigests, 5000);
+  }
+}
+
+async function loadAudit() {
+  const data = await api('/api/audit?limit=200');
+  const tbody = document.getElementById('auditTable');
+  if (!data || !data.entries) {
+    tbody.innerHTML = '<tr><td colspan="5" class="text-muted">Failed to load</td></tr>';
+    return;
+  }
+  if (data.entries.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="5" class="text-muted">No audit entries yet</td></tr>';
+    return;
+  }
+  tbody.innerHTML = data.entries.map(e => {
+    const color = e.result === 'ok' || e.result === 'queued' ? 'var(--green)' : e.result === 'error' || e.result === 'fail' ? 'var(--red)' : 'var(--muted)';
+    return `<tr>
+      <td style="font-size:12px">${escapeHtml(new Date(e.ts).toLocaleString())}</td>
+      <td class="mono">${escapeHtml(e.user)}</td>
+      <td class="mono" style="font-size:12px">${escapeHtml(e.action)}</td>
+      <td class="mono" style="font-size:12px;word-break:break-all">${escapeHtml(e.target || '')}</td>
+      <td><span style="color:${color}">${escapeHtml(e.result)}</span></td>
+    </tr>`;
+  }).join('');
 }
 
 // --- Secrets ---

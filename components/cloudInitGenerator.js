@@ -218,6 +218,73 @@ fi
 `;
 }
 
+function getSupabasePinDigestsSh() {
+  return `#!/bin/bash
+set -euo pipefail
+cd /opt/supabase/docker
+REQ=./upgrade/pin-request.json
+RES=./upgrade/pin-result.json
+LOG=./upgrade/pin.log
+ENVFILE=./.env
+[ -f "$REQ" ] || exit 0
+mkdir -p ./upgrade
+ts() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+REQ_ID=$(jq -r '.id // ""' "$REQ" 2>/dev/null || echo "")
+echo "[$(ts)] pin-digests request id=$REQ_ID" >> "$LOG"
+
+# Map env-key → container name (matches upgrade script)
+declare -A CNAME=(
+  [IMAGE_STUDIO]=supabase-studio
+  [IMAGE_KONG]=supabase-kong
+  [IMAGE_AUTH]=supabase-auth
+  [IMAGE_REST]=supabase-rest
+  [IMAGE_REALTIME]=realtime-dev.supabase-realtime
+  [IMAGE_STORAGE]=supabase-storage
+  [IMAGE_IMGPROXY]=supabase-imgproxy
+  [IMAGE_META]=supabase-meta
+  [IMAGE_FUNCTIONS]=supabase-edge-functions
+  [IMAGE_LOGFLARE]=supabase-analytics
+  [IMAGE_VECTOR]=supabase-vector
+  [IMAGE_SUPAVISOR]=supabase-pooler
+)
+
+cp .env .env.bak.pin
+CHANGED=0
+FAILED=()
+for KEY in "\${!CNAME[@]}"; do
+  CUR=$(grep "^$KEY=" "$ENVFILE" | head -n1 | cut -d= -f2-)
+  [ -n "$CUR" ] || continue
+  # Skip if already pinned
+  case "$CUR" in *"@sha256:"*) continue ;; esac
+  REPO="\${CUR%:*}"
+  C="\${CNAME[$KEY]}"
+  # Inspect container, get its local image id, then ask docker for RepoDigests
+  IMG_ID=$(docker inspect -f '{{.Image}}' "$C" 2>/dev/null || echo "")
+  if [ -z "$IMG_ID" ]; then FAILED+=("$KEY(no-container)"); continue; fi
+  DIGEST=$(docker inspect -f '{{range .RepoDigests}}{{.}}{{"\\n"}}{{end}}' "$IMG_ID" 2>/dev/null | grep "^$REPO@sha256:" | head -n1 || echo "")
+  if [ -z "$DIGEST" ]; then FAILED+=("$KEY(no-digest)"); continue; fi
+  sed -i.tmp "s|^$KEY=.*|$KEY=$DIGEST|" "$ENVFILE" && rm -f "$ENVFILE.tmp"
+  echo "[$(ts)] pinned $KEY → $DIGEST" >> "$LOG"
+  CHANGED=$((CHANGED + 1))
+done
+
+if [ "$CHANGED" -gt 0 ]; then
+  echo "[$(ts)] applying $CHANGED pins via compose up -d" >> "$LOG"
+  docker compose up -d >> "$LOG" 2>&1 || true
+fi
+
+STATUS="ok"
+MSG="pinned $CHANGED services"
+if [ "\${#FAILED[@]}" -gt 0 ]; then
+  MSG="$MSG; failed: \${FAILED[*]}"
+  [ "$CHANGED" = "0" ] && STATUS="error"
+fi
+cat > "$RES" <<EOF
+{"id":"$REQ_ID","status":"$STATUS","changed":$CHANGED,"failed":\${#FAILED[@]},"message":"$MSG","at":"$(ts)"}
+EOF
+`;
+}
+
 function getSupabaseRotateKeysSh() {
   return `#!/bin/bash
 set -euo pipefail
@@ -2303,6 +2370,7 @@ export async function generateCloudInit(config, secrets) {
     { name: 'volumes/functions/hello/index.ts', content: getFunctionsHelloIndex() },
     { name: 'hostbin/supabase-upgrade.sh', content: getSupabaseUpgradeSh() },
     { name: 'hostbin/supabase-rotate-keys.sh', content: getSupabaseRotateKeysSh() },
+    { name: 'hostbin/supabase-pin-digests.sh', content: getSupabasePinDigestsSh() },
   ];
   if (enableAuthelia) {
     tarFiles.push({ name: 'volumes/db/schema-authelia.sh', content: getSchemaAutheliaSh() });
@@ -2828,6 +2896,35 @@ ROTATEPATH
 
 systemctl daemon-reload
 systemctl enable --now supabase-rotate.path
+
+# ── Image pinning host script ──────────────────────────────────────────────────
+install -D -m 755 /opt/supabase/docker/hostbin/supabase-pin-digests.sh /usr/local/bin/supabase-pin-digests.sh
+
+cat > /etc/systemd/system/supabase-pin.service <<'PINSVC'
+[Unit]
+Description=SupaFast image digest pinning executor
+After=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/supabase/docker
+ExecStart=/usr/local/bin/supabase-pin-digests.sh
+PINSVC
+
+cat > /etc/systemd/system/supabase-pin.path <<'PINPATH'
+[Unit]
+Description=Watch image pin request file
+
+[Path]
+PathModified=/opt/supabase/docker/upgrade/pin-request.json
+Unit=supabase-pin.service
+
+[Install]
+WantedBy=multi-user.target
+PINPATH
+
+systemctl daemon-reload
+systemctl enable --now supabase-pin.path
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # PHASE 3: S3 BACKUP SETUP
