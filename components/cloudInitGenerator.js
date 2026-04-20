@@ -2083,7 +2083,7 @@ services:
     environment:
       LOG_LEVEL: warning
       CONTAINERS: 1
-      IMAGES: 0
+      IMAGES: 1
       POST: 0
       ALLOW_START: 1
       ALLOW_STOP: 1
