@@ -42,7 +42,13 @@ It's basically a **managed Supabase solution**, but you own the infrastructure.
 - Unattended security updates
 - Swap configured for server type
 - Docker with hardening flags
-- A management panel at /admin/ to perform basic docker operations for all containers (start/stop/restart), and also to display critical logs / banned IP's on Fail2ban / and backup data.
+- A Studio-styled management panel at `/admin/` with:
+  - **Containers** — start/stop/restart every service, live health status
+  - **Upgrades** — in-place rolling upgrades per service with automatic rollback if the new image fails healthcheck
+  - **Secrets** — read/write `.env` from the UI (Supabase keys, SMTP, Authelia, etc.)
+  - **Backups** — trigger on-demand restic snapshots and view history
+  - **Logs** — per-container logs and Fail2ban ban list
+  - **Security** — rate limit state, image digest pinning (all 18 services), and a full audit log
 
 **Supabase Stack**
 - PostgreSQL 15
@@ -233,6 +239,55 @@ Backups are stored at `s3://YOUR-BUCKET/SERVER-NAME/` with restic's content-addr
 | Backups | restic AES-256, unique key per server, stored in S3 |
 | MCP creds | chmod 600, deploy user only, never in local config |
 | Secrets | Generated in browser via Web Crypto API, never sent to any server |
+| Admin panel auth | Authelia SSO (forward-auth) **+** shared `X-Proxy-Secret` header — defense-in-depth: even if Authelia is bypassed, requests without the secret are rejected by the management API |
+| Admin panel rate limit | 600 reads/min, 30 mutations/min per user (sliding window) — stops runaway scripts and credential-stuffing |
+| Audit log | Every mutating action (restart, upgrade, secret write, pin) logged to `upgrade/audit.log` as JSONL with timestamp, user, IP, browser, device |
+| Supply-chain pinning | One-click "Pin all images" in the Security tab rewrites `.env` and `docker-compose.yml` to `repo@sha256:<digest>` form — defeats tag re-publishing attacks on all 18 services |
+| Docker socket | `linuxserver/socket-proxy` fronts the Docker API — only whitelisted endpoints reach dockerd, and the management container can't touch the host socket directly |
+
+---
+
+## Management Panel
+
+### In-place upgrades
+
+The Upgrades tab lets you pick a service (studio, kong, auth, rest, realtime, storage, imgproxy, meta, functions, analytics, vector, supavisor) and queue a rolling upgrade to any specific version. The flow:
+
+1. Panel writes an `upgrade-request.json` onto a host-shared volume
+2. A systemd `.path` unit on the host fires `supabase-upgrade.sh`
+3. Script pulls the new image, rewrites the image tag in `.env`, runs `docker compose up -d <service>`
+4. Polls the container's health endpoint — if it doesn't reach healthy within the timeout, the script **rolls back** to the previous tag automatically
+5. Upgrade result (success / rollback / error) is written back to the UI
+
+Container-name quirks are handled (e.g. `functions → supabase-edge-functions`, `realtime → realtime-dev.supabase-realtime`, `supavisor → supabase-pooler`), and services without a `HEALTHCHECK` fall back to a "running and stable for 10s" probe.
+
+### Image digest pinning
+
+Tags like `:15.8.1.085` can be re-published by the upstream registry — a compromised upstream can swap the bits under your running tag. The Security tab's **Pin all images** button:
+
+1. Inspects every running container's `RepoDigest`
+2. Rewrites env-driven services in `.env` (e.g. `IMAGE_STUDIO=supabase/studio@sha256:…`)
+3. Rewrites hardcoded infrastructure images (Postgres, Caddy, Authelia, Redis, the management container itself, the socket proxy) in `docker-compose.yml` via in-place sed
+4. New digests take effect on the next `docker compose up` — no mid-flight container recycling, no downtime
+
+Covers all 18 running services; after pinning, future pulls fail loudly if an image has been tampered with.
+
+### Audit log
+
+Every mutating action emits a JSONL entry to `/opt/supabase/docker/upgrade/audit.log` with the timestamp, authenticated user, source IP (Cloudflare `CF-Connecting-IP` aware), parsed browser + OS, action, target, and result. The Security tab renders the last 200 entries. The log is append-only from the app's perspective — compromising the panel user doesn't let you edit prior entries through the API.
+
+### Rate limiting
+
+Per-user sliding-window limiter: **600 reads/min, 30 mutations/min**, keyed by the authenticated `Remote-User` header (Authelia). Dashboard polling fits comfortably inside the read budget; scripted abuse trips the limit within seconds.
+
+### Defense-in-depth auth
+
+Two independent layers guard the management API:
+
+1. Authelia forward-auth — every request to `/admin/*` must carry a valid Authelia session cookie
+2. `X-Proxy-Secret` header — Caddy injects a per-deployment secret into every proxied request; the management API rejects any request missing the secret with a 401
+
+Bypassing either layer alone is not enough; an attacker would need both the session cookie and the proxy secret.
 
 ---
 
@@ -277,7 +332,7 @@ Everything else — Studio, SQL editor, Auth, Storage, Edge Functions, Realtime 
 
 - **[supabase-automated-self-host](https://github.com/singh-inder/supabase-automated-self-host)** by singh-inder — foundation for the Supabase docker-compose configuration
 - **[mcp-supabase-self-hosted](https://github.com/ninedotdev/mcp-supabase-self-hosted)** by ninedotdev — original 37-tool MCP server implementation that made full Supabase MCP integration possible
-- **[docker-socket-proxy](https://github.com/Tecnativa/docker-socket-proxy)** by Tecnativa — Docker API proxy that restricts socket access to only the operations the management panel needs
+- **[docker-socket-proxy](https://github.com/linuxserver/docker-socket-proxy)** by linuxserver.io — Docker API proxy that restricts socket access to only the operations the management panel needs (the linuxserver fork correctly honours per-action `ALLOW_*` overrides; the original Tecnativa image's newer haproxy config blocks all non-`GET` requests globally when `POST=0`, which broke stop/restart in testing)
 - **[restic](https://restic.net/)** — encrypted backup engine
 - **[Caddy](https://caddyserver.com/)** — automatic HTTPS
 - **[Authelia](https://www.authelia.com/)** — 2FA / SSO
