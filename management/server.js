@@ -693,7 +693,24 @@ async function handleUpgradeTags(req, res, service) {
     }
     const env = readTopEnv();
     const currentImage = env.get(imageEnvKey(service)) || '';
-    const currentTag = currentImage.includes(':') ? currentImage.split(':').slice(1).join(':') : '';
+    let currentTag = '';
+    if (currentImage.includes('@sha256:')) {
+      // Digest-pinned: look up the tag from the running container's image RepoTags.
+      try {
+        const cname = containerNameFor(service);
+        const cj = await dockerRequest('GET', `/containers/${encodeURIComponent(cname)}/json`);
+        const imgId = cj.status === 200 && cj.data && cj.data.Image;
+        if (imgId) {
+          const ij = await dockerRequest('GET', `/images/${encodeURIComponent(imgId)}/json`);
+          const tags = ij.status === 200 && ij.data && ij.data.RepoTags || [];
+          const match = tags.find((t) => t.startsWith(repo + ':') && !t.endsWith(':<none>'));
+          if (match) currentTag = match.split(':').slice(1).join(':');
+        }
+      } catch {}
+      if (!currentTag) currentTag = 'pinned@' + currentImage.split('@sha256:')[1].slice(0, 12);
+    } else if (currentImage.includes(':')) {
+      currentTag = currentImage.split(':').slice(1).join(':');
+    }
     const tags = r.data.results
       .map((t) => ({ name: t.name, lastUpdated: t.last_updated, size: t.full_size }))
       .filter((t) => isPinnableTag(t.name));
