@@ -286,6 +286,7 @@ async function generateAllSecrets() {
     autheliaJwtSecret: hex(32),
     resticPassword: hex(24),
     totpSecret: base32Encode(totpRaw),
+    proxySecret: hex(32),
   };
 }
 

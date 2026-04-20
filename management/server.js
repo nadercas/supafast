@@ -10,6 +10,7 @@ const DOCKER_HOST = process.env.DOCKER_HOST || 'tcp://localhost:2375';
 const HOST_LOGS = '/host-logs';
 const HOST_BACKUPS = '/host-backups';
 const UPGRADE_DIR = path.join(SUPABASE_DIR, 'upgrade');
+const PROXY_SECRET = process.env.PROXY_SECRET || '';
 
 const UPGRADABLE_SERVICES = new Set([
   'studio', 'kong', 'auth', 'rest', 'realtime', 'storage',
@@ -965,6 +966,16 @@ const server = http.createServer(async (req, res) => {
   const method = req.method;
 
   try {
+    // Defense-in-depth: all /api/* must carry the shared secret injected by
+    // Caddy. Prevents other containers on management-net from bypassing
+    // Authelia by hitting management:3001 directly.
+    if (PROXY_SECRET && urlPath.startsWith('/api/')) {
+      if (req.headers['x-proxy-secret'] !== PROXY_SECRET) {
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: 'Unauthorized' }));
+      }
+    }
+
     // CSRF protection: require X-Requested-With header on all mutating requests
     if (['POST', 'PUT', 'DELETE', 'PATCH'].includes(method)) {
       if (req.headers['x-requested-with'] !== 'XMLHttpRequest') {

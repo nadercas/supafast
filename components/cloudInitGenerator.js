@@ -1389,6 +1389,7 @@ SECRET_KEY_BASE=${secrets.secretKeyBase}
 VAULT_ENC_KEY=${secrets.vaultEncKey}
 PG_META_CRYPTO_KEY=${secrets.pgMetaCryptoKey}
 RESTIC_PASSWORD=${secrets.resticPassword}
+PROXY_SECRET=${secrets.proxySecret}
 
 ############
 # Database
@@ -2028,6 +2029,7 @@ services:
       DOCKER_HOST: tcp://docker-socket-proxy:2375
       SUPABASE_DIR: /supabase
       SERVER_NAME: \${SERVER_NAME}
+      PROXY_SECRET: \${PROXY_SECRET}
       ${config.enableS3Backups ? `RESTIC_REPOSITORY: \${RESTIC_REPOSITORY}
       RESTIC_PASSWORD: \${RESTIC_PASSWORD}
       AWS_ACCESS_KEY_ID: \${AWS_ACCESS_KEY_ID}
@@ -2234,7 +2236,9 @@ ${enableAuthelia ? `    forward_auth authelia:9091 {
     }` : `    basic_auth {
       {$PROXY_AUTH_USERNAME} {$PROXY_AUTH_PASSWORD}
     }`}
-    reverse_proxy management:3001
+    reverse_proxy management:3001 {
+      header_up X-Proxy-Secret {$PROXY_SECRET}
+    }
   }
 
   handle {
