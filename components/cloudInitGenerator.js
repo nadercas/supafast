@@ -1966,7 +1966,8 @@ services:
       authelia:
         condition: service_healthy` : ''}
     environment:
-      DOMAIN: \${SUPABASE_PUBLIC_URL:?error}${!enableAuthelia ? `
+      DOMAIN: \${SUPABASE_PUBLIC_URL:?error}
+      PROXY_SECRET: \${PROXY_SECRET}${!enableAuthelia ? `
       PROXY_AUTH_USERNAME: \${PROXY_AUTH_USERNAME:?error}
       PROXY_AUTH_PASSWORD: \${PROXY_AUTH_PASSWORD:?error}` : ''}
     volumes:
