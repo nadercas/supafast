@@ -1044,7 +1044,6 @@ async function pollRotateStatus() {
       <div style="font-size:12px;color:var(--muted);margin-top:2px">${esc(data.message || '')} · ${esc(data.at ? timeAgo(data.at) : '')}</div>
     </div>
   </div>`;
-  if (data.status === 'ok' && activeTab === 'keys') loadKeys();
 }
 
 // --- Upgrades ---
