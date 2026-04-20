@@ -302,10 +302,12 @@ for ROW in "\${SERVICES[@]}"; do
   fi
 done
 
-if [ "$CHANGED" -gt 0 ]; then
-  echo "[$(ts)] applying $CHANGED pins via compose up -d" >> "$LOG"
-  docker compose up -d >> "$LOG" 2>&1 || true
-fi
+# Intentionally do NOT run 'docker compose up -d' here. Pins point to the
+# digest of the image already running, so recreating containers changes
+# nothing functional but risks downtime if caddy/management get recycled
+# mid-request (container-self-removal races, Cloudflare 521, etc). The
+# new digests apply naturally on the next deploy/upgrade.
+echo "[$(ts)] $CHANGED pins written; no restart (takes effect on next up)" >> "$LOG"
 
 STATUS="ok"
 MSG="pinned $CHANGED services"

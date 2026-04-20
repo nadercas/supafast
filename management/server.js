@@ -62,9 +62,24 @@ function parseUA(ua) {
 }
 
 function realIp(req) {
+  // Cloudflare sets CF-Connecting-IP to the true client. Behind Cloudflare,
+  // XFF's left-most entry is the CF edge IP, not the user.
+  const cf = req.headers['cf-connecting-ip'];
+  if (cf) return String(cf).trim();
   const xff = req.headers['x-forwarded-for'];
   if (xff) return String(xff).split(',')[0].trim();
   return req.socket.remoteAddress || '';
+}
+
+function isPrivateIp(ip) {
+  if (!ip) return true;
+  if (ip === '127.0.0.1' || ip === '::1') return true;
+  if (ip.startsWith('10.') || ip.startsWith('192.168.') || ip.startsWith('169.254.')) return true;
+  // 172.16.0.0/12 only (16-31), NOT the full 172.x range.
+  const m = ip.match(/^172\.(\d+)\./);
+  if (m) { const o = parseInt(m[1], 10); if (o >= 16 && o <= 31) return true; }
+  if (ip.startsWith('fc') || ip.startsWith('fd') || ip.startsWith('fe80:')) return true;
+  return false;
 }
 
 // In-memory geo cache: ip → { city, country, ts }. TTL 24h.
@@ -72,7 +87,7 @@ const geoCache = new Map();
 const GEO_TTL = 24 * 60 * 60 * 1000;
 function geoLookup(ip) {
   return new Promise((resolve) => {
-    if (!ip || ip === '127.0.0.1' || ip.startsWith('10.') || ip.startsWith('192.168.') || ip.startsWith('172.')) {
+    if (isPrivateIp(ip)) {
       return resolve({ city: '', country: 'Local' });
     }
     const cached = geoCache.get(ip);
