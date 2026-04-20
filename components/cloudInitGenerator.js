@@ -136,6 +136,13 @@ case "$SERVICE" in
   supavisor) ENVKEY=IMAGE_SUPAVISOR; COMPOSE_SVC=supavisor ;;
 esac
 
+case "$SERVICE" in
+  functions) CNAME=supabase-edge-functions ;;
+  realtime)  CNAME=realtime-dev.supabase-realtime ;;
+  supavisor) CNAME=supabase-pooler ;;
+  *)         CNAME="supabase-$SERVICE" ;;
+esac
+
 CURRENT=$(grep "^$ENVKEY=" .env | head -n1 | cut -d= -f2-)
 [ -n "$CURRENT" ] || { write_result "error" "$SERVICE" "" "$TARGET" "current image not found in .env"; exit 0; }
 
@@ -176,15 +183,18 @@ fi
 echo "[$(ts)] recreating $SERVICE" >> "$LOG"
 docker compose up -d --no-deps "$COMPOSE_SVC" >> "$LOG" 2>&1 || true
 
-CNAME="supabase-$SERVICE"
 DEADLINE=$(( $(date +%s) + 90 ))
 HEALTHY=0
 while [ $(date +%s) -lt $DEADLINE ]; do
-  STATE=$(docker inspect -f '{{.State.Health.Status}}{{.State.Status}}' "$CNAME" 2>/dev/null || echo "")
+  STATE=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}nohealth{{end}}|{{.State.Status}}' "$CNAME" 2>/dev/null || echo "")
   case "$STATE" in
-    healthy*)   HEALTHY=1; break ;;
-    *running)   HEALTHY=1; break ;;
-    unhealthy*|exited*|*dead*) break ;;
+    healthy\|*)          HEALTHY=1; break ;;
+    nohealth\|running)   # no HEALTHCHECK defined — require 10s of stable "running" before declaring healthy
+      sleep 10
+      STATE2=$(docker inspect -f '{{.State.Status}}' "$CNAME" 2>/dev/null || echo "")
+      [ "$STATE2" = "running" ] && HEALTHY=1
+      break ;;
+    unhealthy\|*|*\|exited|*\|dead) break ;;
   esac
   sleep 3
 done
@@ -195,7 +205,7 @@ if [ "$HEALTHY" = "1" ]; then
 else
   {
     echo "=== docker inspect (final state) ==="
-    docker inspect -f 'Status={{.State.Status}} Health={{.State.Health.Status}} ExitCode={{.State.ExitCode}} Error={{.State.Error}}' "$CNAME" 2>&1 || true
+    docker inspect -f 'Status={{.State.Status}} Health={{if .State.Health}}{{.State.Health.Status}}{{else}}nohealth{{end}} ExitCode={{.State.ExitCode}} Error={{.State.Error}}' "$CNAME" 2>&1 || true
     echo
     echo "=== docker logs --tail=100 $CNAME ==="
     docker logs --tail=100 --timestamps "$CNAME" 2>&1 || true
@@ -1966,7 +1976,11 @@ services:
 
   docker-socket-proxy:
     container_name: docker-socket-proxy
-    image: tecnativa/docker-socket-proxy:latest
+    # lscr.io/linuxserver/socket-proxy: maintained fork that still honors
+    # ALLOW_START / ALLOW_STOP / ALLOW_RESTARTS when POST=0. Current
+    # tecnativa/docker-socket-proxy (haproxy-based) denies all non-GET
+    # requests globally when POST=0, making ALLOW_* flags dead code.
+    image: lscr.io/linuxserver/socket-proxy:latest
     restart: unless-stopped
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro

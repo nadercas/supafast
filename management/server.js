@@ -647,7 +647,12 @@ async function handleUpgradeStart(req, res, service) {
     }
 
     const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-    const pending = { id, status: 'pending', service, from: '', to: target, message: 'queued', at: new Date().toISOString() };
+    let fromImage = '';
+    try {
+      const env = readTopEnv();
+      fromImage = env.get(imageEnvKey(service)) || '';
+    } catch {}
+    const pending = { id, status: 'pending', service, from: fromImage, to: target, message: 'queued', at: new Date().toISOString() };
     fs.writeFileSync(resultPath, JSON.stringify(pending));
 
     // Atomic write: write to tmp then rename so path unit sees one PathModified.
