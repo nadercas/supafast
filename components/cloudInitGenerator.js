@@ -53,6 +53,12 @@ function createTar(files) {
   return result;
 }
 
+function base64Only(data) {
+  let binary = '';
+  for (let i = 0; i < data.length; i++) binary += String.fromCharCode(data[i]);
+  return btoa(binary);
+}
+
 async function gzipAndBase64(data) {
   const cs = new CompressionStream('gzip');
   const writer = cs.writable.getWriter();
@@ -82,21 +88,348 @@ async function gzipAndBase64(data) {
 // They do NOT need JS interpolation — any runtime variables use
 // Docker Compose ${VAR} or tool-specific syntax (Kong $VAR, Vector ${VAR}, etc.)
 
-function getKongYml(anonKey, serviceRoleKey, dashboardUsername, dashboardPassword) {
+function getSupabaseUpgradeSh() {
+  return `#!/bin/bash
+set -euo pipefail
+cd /opt/supabase/docker
+REQ=./upgrade/request.json
+RES=./upgrade/result.json
+LOG=./upgrade/upgrade.log
+[ -f "$REQ" ] || exit 0
+
+ts() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+write_result() {
+  cat > "$RES" <<EOF
+{"id":"\${REQ_ID:-}","status":"$1","service":"$2","from":"$3","to":"$4","message":"$5","at":"$(ts)"}
+EOF
+}
+
+ACTION=$(jq -r '.action // "upgrade"' "$REQ")
+SERVICE=$(jq -r '.service // ""' "$REQ")
+TARGET=$(jq -r '.target // ""' "$REQ")
+REQ_ID=$(jq -r '.id // ""' "$REQ")
+
+echo "[$(ts)] request id=$REQ_ID action=$ACTION service=$SERVICE target=$TARGET" >> "$LOG"
+
+if ! [[ "$TARGET" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$ ]]; then
+  write_result "error" "$SERVICE" "" "$TARGET" "invalid tag format"
+  exit 0
+fi
+
+case "$SERVICE" in
+  studio|kong|auth|rest|realtime|storage|imgproxy|meta|functions|analytics|vector|supavisor) ;;
+  *) write_result "error" "$SERVICE" "" "$TARGET" "service not upgradable via panel"; exit 0 ;;
+esac
+
+case "$SERVICE" in
+  studio)    ENVKEY=IMAGE_STUDIO;    COMPOSE_SVC=supabase-studio ;;
+  kong)      ENVKEY=IMAGE_KONG;      COMPOSE_SVC=kong ;;
+  auth)      ENVKEY=IMAGE_AUTH;      COMPOSE_SVC=auth ;;
+  rest)      ENVKEY=IMAGE_REST;      COMPOSE_SVC=rest ;;
+  realtime)  ENVKEY=IMAGE_REALTIME;  COMPOSE_SVC=realtime ;;
+  storage)   ENVKEY=IMAGE_STORAGE;   COMPOSE_SVC=storage ;;
+  imgproxy)  ENVKEY=IMAGE_IMGPROXY;  COMPOSE_SVC=imgproxy ;;
+  meta)      ENVKEY=IMAGE_META;      COMPOSE_SVC=meta ;;
+  functions) ENVKEY=IMAGE_FUNCTIONS; COMPOSE_SVC=functions ;;
+  analytics) ENVKEY=IMAGE_LOGFLARE;  COMPOSE_SVC=analytics ;;
+  vector)    ENVKEY=IMAGE_VECTOR;    COMPOSE_SVC=vector ;;
+  supavisor) ENVKEY=IMAGE_SUPAVISOR; COMPOSE_SVC=supavisor ;;
+esac
+
+CURRENT=$(grep "^$ENVKEY=" .env | head -n1 | cut -d= -f2-)
+[ -n "$CURRENT" ] || { write_result "error" "$SERVICE" "" "$TARGET" "current image not found in .env"; exit 0; }
+
+REPO="\${CURRENT%:*}"
+NEW_IMAGE="$REPO:$TARGET"
+
+DUMP_DIR=/var/backups/supabase/pre-upgrade
+mkdir -p "$DUMP_DIR"
+find "$DUMP_DIR" -name '*.sql.gz' -mtime +14 -delete 2>/dev/null || true
+DUMP_PATH="$DUMP_DIR/$(date -u +%Y%m%dT%H%M%SZ)-$SERVICE-\${TARGET//[^A-Za-z0-9._-]/_}.sql.gz"
+echo "[$(ts)] pg_dumpall → $DUMP_PATH" >> "$LOG"
+( umask 077 && : > "$DUMP_PATH" )
+if ! docker exec -t supabase-db sh -c 'pg_dumpall -U postgres' 2>>"$LOG" | gzip > "$DUMP_PATH"; then
+  rm -f "$DUMP_PATH"
+  write_result "error" "$SERVICE" "$CURRENT" "$NEW_IMAGE" "pg_dumpall failed; aborting upgrade"
+  exit 0
+fi
+chmod 600 "$DUMP_PATH"
+
+cp .env .env.bak.upgrade
+sed -i.tmp "s|^$ENVKEY=.*|$ENVKEY=$NEW_IMAGE|" .env && rm -f .env.tmp
+
+echo "[$(ts)] pulling $NEW_IMAGE" >> "$LOG"
+PULL_ERR=./upgrade/last-failure.log
+: > "$PULL_ERR"
+if ! docker compose pull "$COMPOSE_SVC" > "$PULL_ERR" 2>&1; then
+  cat "$PULL_ERR" >> "$LOG"
+  mv .env.bak.upgrade .env
+  HINT="docker pull failed"
+  if grep -qi 'manifest.*not found\\|manifest unknown\\|not found: manifest' "$PULL_ERR"; then HINT="tag $TARGET not found on Docker Hub"
+  elif grep -qi 'toomanyrequests\\|rate limit' "$PULL_ERR"; then HINT="Docker Hub rate limit hit; retry in a few minutes"
+  elif grep -qi 'no such host\\|connection refused\\|network' "$PULL_ERR"; then HINT="network error reaching Docker Hub"
+  fi
+  write_result "error" "$SERVICE" "$CURRENT" "$NEW_IMAGE" "$HINT"
+  exit 0
+fi
+
+echo "[$(ts)] recreating $SERVICE" >> "$LOG"
+docker compose up -d --no-deps "$COMPOSE_SVC" >> "$LOG" 2>&1 || true
+
+CNAME="supabase-$SERVICE"
+DEADLINE=$(( $(date +%s) + 90 ))
+HEALTHY=0
+while [ $(date +%s) -lt $DEADLINE ]; do
+  STATE=$(docker inspect -f '{{.State.Health.Status}}{{.State.Status}}' "$CNAME" 2>/dev/null || echo "")
+  case "$STATE" in
+    healthy*)   HEALTHY=1; break ;;
+    *running)   HEALTHY=1; break ;;
+    unhealthy*|exited*|*dead*) break ;;
+  esac
+  sleep 3
+done
+
+if [ "$HEALTHY" = "1" ]; then
+  rm -f .env.bak.upgrade
+  write_result "ok" "$SERVICE" "$CURRENT" "$NEW_IMAGE" "upgrade verified; pg_dump at $DUMP_PATH"
+else
+  {
+    echo "=== docker inspect (final state) ==="
+    docker inspect -f 'Status={{.State.Status}} Health={{.State.Health.Status}} ExitCode={{.State.ExitCode}} Error={{.State.Error}}' "$CNAME" 2>&1 || true
+    echo
+    echo "=== docker logs --tail=100 $CNAME ==="
+    docker logs --tail=100 --timestamps "$CNAME" 2>&1 || true
+  } > ./upgrade/last-failure.log
+  echo "[$(ts)] healthcheck failed; rolling back (failure logs → upgrade/last-failure.log)" >> "$LOG"
+  mv .env.bak.upgrade .env
+  docker compose up -d --no-deps "$COMPOSE_SVC" >> "$LOG" 2>&1 || true
+  write_result "rolled_back" "$SERVICE" "$CURRENT" "$NEW_IMAGE" "new image failed healthcheck; restored $CURRENT (see last-failure log)"
+fi
+`;
+}
+
+function getSupabaseRotateKeysSh() {
+  return `#!/bin/bash
+set -euo pipefail
+cd /opt/supabase/docker
+REQ=./upgrade/rotate-request.json
+RES=./upgrade/rotate-result.json
+STATE=./upgrade/rotation-state.json
+LOG=./upgrade/rotate.log
+ENVFILE=./.env
+KONGFILE=./volumes/api/kong.yml
+[ -f "$REQ" ] || exit 0
+
+ts() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+write_result() {
+  cat > "$RES" <<EOF
+{"id":"\${REQ_ID:-}","status":"$1","action":"\${ACTION:-}","kid":"\${KID:-}","message":"$2","at":"$(ts)"}
+EOF
+}
+
+REQ_ID=$(jq -r '.id // ""' "$REQ")
+ACTION=$(jq -r '.action // ""' "$REQ")
+KID=$(jq -r '.kid // .bundle.kid // ""' "$REQ")
+echo "[$(ts)] id=$REQ_ID action=$ACTION kid=$KID" >> "$LOG"
+
+if [ ! -f "$STATE" ]; then
+  python3 - "$ENVFILE" "$STATE" <<'SEEDPY'
+import sys, json, re
+env_path, state_path = sys.argv[1], sys.argv[2]
+env = {}
+for line in open(env_path):
+    s = line.strip()
+    if not s or s.startswith('#') or '=' not in s: continue
+    k, v = s.split('=', 1)
+    if (v.startswith("'") and v.endswith("'")) or (v.startswith('"') and v.endswith('"')):
+        v = v[1:-1]
+    env[k] = v
+jwt_keys = json.loads(env.get('JWT_KEYS', '[]'))
+ec = next((k for k in jwt_keys if k.get('kty') == 'EC'), None)
+jwks_all = json.loads(env.get('JWT_JWKS', '{"keys":[]}')).get('keys', [])
+ec_pub = next((k for k in jwks_all if k.get('kty') == 'EC'), None)
+active = []
+if ec and ec_pub:
+    active.append({
+        'kid': ec.get('kid'),
+        'private_jwk': ec,
+        'public_jwk': ec_pub,
+        'publishable_key': env.get('SUPABASE_PUBLISHABLE_KEY', ''),
+        'secret_key': env.get('SUPABASE_SECRET_KEY', ''),
+        'created_at': 'deploy',
+    })
+state = {
+    'active_keys': active,
+    'legacy': {
+        'jwt_secret': env.get('JWT_SECRET', ''),
+        'anon_key': env.get('ANON_KEY', ''),
+        'service_role_key': env.get('SERVICE_ROLE_KEY', ''),
+    },
+}
+open(state_path, 'w').write(json.dumps(state, indent=2))
+SEEDPY
+  chmod 600 "$STATE"
+  echo "[$(ts)] seeded state from .env" >> "$LOG"
+fi
+
+python3 - "$REQ" "$STATE" "$ENVFILE" "$KONGFILE" <<'ROTATEPY' || { write_result "error" "rotation script failed"; exit 0; }
+import sys, json, re, base64, os, tempfile
+
+req_path, state_path, env_path, kong_path = sys.argv[1:5]
+req = json.load(open(req_path))
+state = json.load(open(state_path))
+action = req.get('action')
+
+if action == 'rotate':
+    bundle = req.get('bundle') or {}
+    if not bundle.get('kid'):
+        print('rotate: missing bundle.kid', file=sys.stderr); sys.exit(1)
+    if any(k['kid'] == bundle['kid'] for k in state['active_keys']):
+        print('rotate: kid already active', file=sys.stderr); sys.exit(1)
+    state['active_keys'].append({
+        'kid': bundle['kid'],
+        'private_jwk': bundle['private_jwk'],
+        'public_jwk': bundle['public_jwk'],
+        'publishable_key': bundle['publishable_key'],
+        'secret_key': bundle['secret_key'],
+        'created_at': bundle.get('created_at') or '',
+    })
+elif action == 'finalize':
+    kid = req.get('kid')
+    if not kid:
+        print('finalize: missing kid', file=sys.stderr); sys.exit(1)
+    if len(state['active_keys']) <= 1:
+        print('finalize: refusing to remove the only active key', file=sys.stderr); sys.exit(1)
+    before = len(state['active_keys'])
+    state['active_keys'] = [k for k in state['active_keys'] if k['kid'] != kid]
+    if len(state['active_keys']) == before:
+        print('finalize: kid not found', file=sys.stderr); sys.exit(1)
+else:
+    print(f'unknown action: {action}', file=sys.stderr); sys.exit(1)
+
+def hs256_jwk(secret):
+    raw = secret.encode('utf-8')
+    k = base64.urlsafe_b64encode(raw).decode().rstrip('=')
+    return {'kty': 'oct', 'k': k, 'alg': 'HS256', 'kid': 'legacy'}
+
+legacy = state['legacy']
+hs = hs256_jwk(legacy['jwt_secret'])
+# GoTrue JWT_KEYS: exactly one key with key_ops ["sign"] (newest active),
+# all others verify-only. HS256 stays out of this set (handled by GOTRUE_JWT_SECRET).
+active = state['active_keys']
+priv_keys = []
+for i, k in enumerate(active):
+    jwk = dict(k['private_jwk']) if i == len(active) - 1 else dict(k['public_jwk'])
+    jwk['key_ops'] = ['sign'] if i == len(active) - 1 else ['verify']
+    priv_keys.append(jwk)
+# Verification JWKS for PostgREST/Storage/Realtime: public EC keys + HS256 oct.
+pub_keys = [k['public_jwk'] for k in active] + [hs]
+
+jwt_keys_val = json.dumps(priv_keys, separators=(',', ':'))
+jwt_jwks_val = json.dumps({'keys': pub_keys}, separators=(',', ':'))
+
+newest = state['active_keys'][-1]
+publishable = newest['publishable_key']
+secret = newest['secret_key']
+
+def update_env(path, updates):
+    lines = open(path).read().split('\\n')
+    seen = set()
+    out = []
+    for line in lines:
+        m = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)=", line)
+        if m and m.group(1) in updates:
+            k = m.group(1)
+            v = updates[k]
+            if v.startswith('[') or v.startswith('{'):
+                out.append(f"{k}='{v}'")
+            else:
+                out.append(f"{k}={v}")
+            seen.add(k)
+        else:
+            out.append(line)
+    for k, v in updates.items():
+        if k not in seen:
+            if v.startswith('[') or v.startswith('{'):
+                out.append(f"{k}='{v}'")
+            else:
+                out.append(f"{k}={v}")
+    open(path, 'w').write('\\n'.join(out))
+
+update_env(env_path, {
+    'JWT_KEYS': jwt_keys_val,
+    'JWT_JWKS': jwt_jwks_val,
+    'SUPABASE_PUBLISHABLE_KEY': publishable,
+    'SUPABASE_SECRET_KEY': secret,
+})
+
+kong = open(kong_path).read()
+anon_creds = [f"      - key: {legacy['anon_key']}"]
+service_creds = [f"      - key: {legacy['service_role_key']}"]
+for k in state['active_keys']:
+    anon_creds.append(f"      - key: {k['publishable_key']}")
+    service_creds.append(f"      - key: {k['secret_key']}")
+
+block = "# SUPAFAST_CONSUMERS_BEGIN — managed by supabase-rotate-keys.sh; do not edit by hand\\n"
+block += "  - username: anon\\n    keyauth_credentials:\\n" + "\\n".join(anon_creds) + "\\n"
+block += "  - username: service_role\\n    keyauth_credentials:\\n" + "\\n".join(service_creds) + "\\n"
+block += "# SUPAFAST_CONSUMERS_END"
+
+new_kong = re.sub(
+    r"# SUPAFAST_CONSUMERS_BEGIN.*?# SUPAFAST_CONSUMERS_END",
+    lambda _: block,
+    kong,
+    count=1,
+    flags=re.DOTALL,
+)
+if new_kong == kong:
+    print('kong.yml: markers not found', file=sys.stderr); sys.exit(1)
+
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(kong_path))
+os.write(fd, new_kong.encode('utf-8'))
+os.close(fd)
+os.chmod(tmp, 0o644)
+os.replace(tmp, kong_path)
+
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(state_path))
+os.write(fd, json.dumps(state, indent=2).encode('utf-8'))
+os.close(fd)
+os.replace(tmp, state_path)
+ROTATEPY
+
+chmod 600 "$STATE" "$ENVFILE"
+
+echo "[$(ts)] reloading services" >> "$LOG"
+docker compose up -d --no-deps --force-recreate kong auth rest realtime storage >> "$LOG" 2>&1 || true
+
+write_result "ok" "rotation applied; \${ACTION} complete"
+`;
+}
+
+
+function getKongYml(anonKey, serviceRoleKey, dashboardUsername, dashboardPassword, publishableKey, secretKey) {
   return `_format_version: "2.1"
 _transform: true
 
 ###
 ### Consumers / Users
+### Each data-plane consumer accepts two credentials: the legacy HS256 JWT
+### (anon_key / service_role_key) and the new opaque API key
+### (sb_publishable_* / sb_secret_*). Clients may present either; Kong routes
+### them to the same ACL group so all existing routes keep working.
 ###
 consumers:
   - username: DASHBOARD
+# SUPAFAST_CONSUMERS_BEGIN — managed by supabase-rotate-keys.sh; do not edit by hand
   - username: anon
     keyauth_credentials:
       - key: ${anonKey}
+      - key: ${publishableKey}
   - username: service_role
     keyauth_credentials:
       - key: ${serviceRoleKey}
+      - key: ${secretKey}
+# SUPAFAST_CONSUMERS_END
 
 ###
 ### Access Control List
@@ -1034,6 +1367,13 @@ POSTGRES_PASSWORD=${secrets.postgresPassword}
 JWT_SECRET=${secrets.jwtSecret}
 ANON_KEY=${secrets.anonKey}
 SERVICE_ROLE_KEY=${secrets.serviceRoleKey}
+# New-format Supabase keys (https://supabase.com/docs/guides/self-hosting/self-hosted-auth-keys)
+# JWT_KEYS: signing set for GoTrue (private EC JWK + legacy HS256 oct JWK)
+# JWT_JWKS: verification set for PostgREST/Storage/Realtime (public EC JWK + legacy HS256 oct JWK)
+JWT_KEYS='${secrets.jwtKeys}'
+JWT_JWKS='${secrets.jwtJwks}'
+SUPABASE_PUBLISHABLE_KEY=${secrets.publishableKey}
+SUPABASE_SECRET_KEY=${secrets.secretKey}
 DASHBOARD_USERNAME=supabase
 SECRET_KEY_BASE=${secrets.secretKeyBase}
 VAULT_ENC_KEY=${secrets.vaultEncKey}
@@ -1135,6 +1475,23 @@ MINIO_ROOT_PASSWORD=${secrets.minioRootPassword}
 # Server
 ############
 SERVER_NAME=${config.serverName}
+
+############
+# Service image pins (edited by management panel upgrade flow)
+# Stateless services only; postgres is controlled by the PG version toggle.
+############
+IMAGE_STUDIO=supabase/studio:2026.04.08-sha-205cbe7
+IMAGE_KONG=kong/kong:3.9.1
+IMAGE_AUTH=supabase/gotrue:v2.186.0
+IMAGE_REST=postgrest/postgrest:v14.8
+IMAGE_REALTIME=supabase/realtime:v2.76.5
+IMAGE_STORAGE=supabase/storage-api:v1.48.26
+IMAGE_IMGPROXY=darthsim/imgproxy:v3.30.1
+IMAGE_META=supabase/postgres-meta:v0.96.3
+IMAGE_FUNCTIONS=supabase/edge-runtime:v1.71.2
+IMAGE_LOGFLARE=supabase/logflare:1.36.1
+IMAGE_VECTOR=timberio/vector:0.28.1-alpine
+IMAGE_SUPAVISOR=supabase/supavisor:2.7.4
 ${enableS3Backups ? `
 ############
 # Backups (S3)
@@ -1146,7 +1503,10 @@ AWS_SECRET_ACCESS_KEY=${config.s3SecretKey}` : ''}
 }
 
 export function generateDockerCompose(config) {
-  const { enableAuthelia, enableRedis } = config;
+  const { enableAuthelia, enableRedis, postgresVersion } = config;
+  const pgImage = postgresVersion === "17"
+    ? "supabase/postgres:17.6.1.108"
+    : "supabase/postgres:15.8.1.085";
 
   // All Docker Compose ${VAR} references are escaped as \${VAR} in JS template literals
   let compose = `name: supabase
@@ -1154,16 +1514,10 @@ export function generateDockerCompose(config) {
 services:
   supabase-studio:
     container_name: supabase-studio
-    image: supabase/studio:2026.01.27-sha-6aa59ff
+    image: \${IMAGE_STUDIO}
     restart: unless-stopped
     healthcheck:
-      test:
-        [
-          "CMD",
-          "node",
-          "-e",
-          "fetch('http://supabase-studio:3000/api/platform/profile').then((r) => {if (r.status !== 200) throw new Error(r.status)})"
-        ]
+      test: ["CMD-SHELL", "node -e \\"fetch('http://supabase-studio:3000/api/platform/profile').then((r) => {if (r.status !== 200) throw new Error(r.status)})\\""]
       timeout: 10s
       interval: 5s
       retries: 3
@@ -1171,7 +1525,7 @@ services:
       analytics:
         condition: service_healthy
     environment:
-      HOSTNAME: "::"
+      HOSTNAME: "0.0.0.0"
       STUDIO_PG_META_URL: http://meta:8080
       POSTGRES_PORT: \${POSTGRES_PORT}
       POSTGRES_HOST: \${POSTGRES_HOST}
@@ -1201,7 +1555,7 @@ services:
 
   kong:
     container_name: supabase-kong
-    image: kong:2.8.1
+    image: \${IMAGE_KONG}
     restart: unless-stopped
     volumes:
       - ./volumes/api/kong.yml:/home/kong/kong.yml:ro,z
@@ -1218,7 +1572,7 @@ services:
 
   auth:
     container_name: supabase-auth
-    image: supabase/gotrue:v2.185.0
+    image: \${IMAGE_AUTH}
     restart: unless-stopped
     healthcheck:
       test:
@@ -1252,6 +1606,10 @@ services:
       GOTRUE_JWT_DEFAULT_GROUP_NAME: authenticated
       GOTRUE_JWT_EXP: \${JWT_EXPIRY}
       GOTRUE_JWT_SECRET: \${JWT_SECRET}
+      # ES256 signing: JSON array of JWKs with exactly one private EC key
+      # marked key_ops: ["sign"]. Legacy HS256 verification still works via
+      # GOTRUE_JWT_SECRET fallback (FindPublicKeyByKid).
+      GOTRUE_JWT_KEYS: \${JWT_KEYS}
       GOTRUE_EXTERNAL_EMAIL_ENABLED: \${ENABLE_EMAIL_SIGNUP}
       GOTRUE_EXTERNAL_ANONYMOUS_USERS_ENABLED: \${ENABLE_ANONYMOUS_USERS}
       GOTRUE_MAILER_AUTOCONFIRM: \${ENABLE_EMAIL_AUTOCONFIRM}
@@ -1270,7 +1628,7 @@ services:
 
   rest:
     container_name: supabase-rest
-    image: postgrest/postgrest:v14.3
+    image: \${IMAGE_REST}
     restart: unless-stopped
     depends_on:
       db:
@@ -1281,7 +1639,9 @@ services:
       PGRST_DB_URI: postgres://authenticator:\${POSTGRES_PASSWORD}@\${POSTGRES_HOST}:\${POSTGRES_PORT}/\${POSTGRES_DB}
       PGRST_DB_SCHEMAS: \${PGRST_DB_SCHEMAS}
       PGRST_DB_ANON_ROLE: anon
-      PGRST_JWT_SECRET: \${JWT_SECRET}
+      # JWKS contains both the EC public key and the legacy HS256 oct JWK, so
+      # PostgREST verifies new ES256 and legacy HS256 tokens from one env var.
+      PGRST_JWT_SECRET: \${JWT_JWKS}
       PGRST_DB_USE_LEGACY_GUCS: "false"
       PGRST_APP_SETTINGS_JWT_SECRET: \${JWT_SECRET}
       PGRST_APP_SETTINGS_JWT_EXP: \${JWT_EXPIRY}
@@ -1289,7 +1649,7 @@ services:
 
   realtime:
     container_name: realtime-dev.supabase-realtime
-    image: supabase/realtime:v2.72.0
+    image: \${IMAGE_REALTIME}
     restart: unless-stopped
     depends_on:
       db:
@@ -1316,6 +1676,7 @@ services:
       DB_AFTER_CONNECT_QUERY: "SET search_path TO _realtime"
       DB_ENC_KEY: supabaserealtime
       API_JWT_SECRET: \${JWT_SECRET}
+      API_JWT_JWKS: \${JWT_JWKS}
       SECRET_KEY_BASE: \${SECRET_KEY_BASE}
       ERL_AFLAGS: -proto_dist inet_tcp
       DNS_NODES: "''"
@@ -1327,7 +1688,7 @@ services:
 
   storage:
     container_name: supabase-storage
-    image: supabase/storage-api:v1.37.1
+    image: \${IMAGE_STORAGE}
     restart: unless-stopped
     volumes:
       - ./volumes/storage:/var/lib/storage:z
@@ -1356,6 +1717,7 @@ services:
       SERVICE_KEY: \${SERVICE_ROLE_KEY}
       POSTGREST_URL: http://rest:3000
       PGRST_JWT_SECRET: \${JWT_SECRET}
+      JWT_JWKS: \${JWT_JWKS}
       DATABASE_URL: postgres://supabase_storage_admin:\${POSTGRES_PASSWORD}@\${POSTGRES_HOST}:\${POSTGRES_PORT}/\${POSTGRES_DB}
       REQUEST_ALLOW_X_FORWARDED_PATH: "true"
       FILE_SIZE_LIMIT: 52428800
@@ -1371,7 +1733,7 @@ services:
 
   imgproxy:
     container_name: supabase-imgproxy
-    image: darthsim/imgproxy:v3.30.1
+    image: \${IMAGE_IMGPROXY}
     restart: unless-stopped
     volumes:
       - ./volumes/storage:/var/lib/storage:z
@@ -1389,7 +1751,7 @@ services:
 
   meta:
     container_name: supabase-meta
-    image: supabase/postgres-meta:v0.95.2
+    image: \${IMAGE_META}
     restart: unless-stopped
     depends_on:
       db:
@@ -1407,7 +1769,7 @@ services:
 
   functions:
     container_name: supabase-edge-functions
-    image: supabase/edge-runtime:v1.70.0
+    image: \${IMAGE_FUNCTIONS}
     restart: unless-stopped
     volumes:
       - ./volumes/functions:/home/deno/functions:Z
@@ -1428,7 +1790,7 @@ services:
 
   analytics:
     container_name: supabase-analytics
-    image: supabase/logflare:1.30.3
+    image: \${IMAGE_LOGFLARE}
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "http://localhost:4000/health"]
@@ -1456,7 +1818,7 @@ services:
 
   db:
     container_name: supabase-db
-    image: supabase/postgres:15.8.1.085
+    image: ${pgImage}
     restart: unless-stopped
     volumes:
       - ./volumes/db/realtime.sql:/docker-entrypoint-initdb.d/migrations/99-realtime.sql:Z
@@ -1498,7 +1860,7 @@ services:
 
   vector:
     container_name: supabase-vector
-    image: timberio/vector:0.28.1-alpine
+    image: \${IMAGE_VECTOR}
     restart: unless-stopped
     volumes:
       - ./volumes/logs/vector.yml:/etc/vector/vector.yml:ro,z
@@ -1524,7 +1886,7 @@ services:
 
   supavisor:
     container_name: supabase-pooler
-    image: supabase/supavisor:2.7.4
+    image: \${IMAGE_SUPAVISOR}
     restart: unless-stopped
     ulimits:
       nofile:
@@ -1638,6 +2000,8 @@ services:
       - ./backup.env:/app/backup.env:ro
       - .:/supabase:ro
       - ./volumes/functions/.env:/supabase/volumes/functions/.env
+      - ./upgrade:/supabase/upgrade
+      - /var/backups/supabase:/host-backups:ro
     expose:
       - "3001"
     depends_on:
@@ -1906,7 +2270,7 @@ export async function generateCloudInit(config, secrets) {
 
   // Build tarball of static config files
   const tarFiles = [
-    { name: 'volumes/api/kong.yml', content: getKongYml(secrets.anonKey, secrets.serviceRoleKey, 'supabase', 'not_being_used') },
+    { name: 'volumes/api/kong.yml', content: getKongYml(secrets.anonKey, secrets.serviceRoleKey, 'supabase', 'not_being_used', secrets.publishableKey, secrets.secretKey) },
     { name: 'volumes/db/realtime.sql', content: getRealtimeSql() },
     { name: 'volumes/db/roles.sql', content: getRolesSql() },
     { name: 'volumes/db/webhooks.sql', content: getWebhooksSql() },
@@ -1918,6 +2282,8 @@ export async function generateCloudInit(config, secrets) {
     { name: 'volumes/pooler/pooler.exs', content: getPoolerExs() },
     { name: 'volumes/functions/main/index.ts', content: getFunctionsMainIndex() },
     { name: 'volumes/functions/hello/index.ts', content: getFunctionsHelloIndex() },
+    { name: 'hostbin/supabase-upgrade.sh', content: getSupabaseUpgradeSh() },
+    { name: 'hostbin/supabase-rotate-keys.sh', content: getSupabaseRotateKeysSh() },
   ];
   if (enableAuthelia) {
     tarFiles.push({ name: 'volumes/db/schema-authelia.sh', content: getSchemaAutheliaSh() });
@@ -1926,9 +2292,17 @@ export async function generateCloudInit(config, secrets) {
   const tarData = createTar(tarFiles);
   const payload = await gzipAndBase64(tarData);
 
-  // Build dynamic configs
-  const envFile = generateEnvFile(config, secrets);
-  const composeFile = generateDockerCompose(config);
+  // Build dynamic configs. Strip explanatory comments + blank runs from the
+  // large YAML/shell outputs — they take a few KB of the 32 KiB user_data
+  // budget and are regenerable from source.
+  const stripYamlComments = (s) => s.split('\n').filter((l, i, a) => {
+    const t = l.trim();
+    if (t.startsWith('#')) return false;
+    if (t === '' && i > 0 && a[i - 1].trim() === '') return false;
+    return true;
+  }).join('\n');
+  const envFile = stripYamlComments(generateEnvFile(config, secrets));
+  const composeFile = stripYamlComments(generateDockerCompose(config));
   const caddyfile = generateCaddyfile(config);
   const corsConf = generateCorsConf();
 
@@ -2372,6 +2746,70 @@ FUNCPATH
 systemctl daemon-reload
 systemctl enable --now supabase-functions-reload.path
 
+# ── Upgrade / rotation / restore trigger directory ─────────────────────────────
+# The management container writes request.json into ./upgrade/; a systemd path
+# unit picks it up and invokes the corresponding host script. Scripts run as
+# root on the host so they can docker compose + pg_dumpall via docker exec.
+mkdir -p /opt/supabase/docker/upgrade
+chmod 755 /opt/supabase/docker/upgrade
+
+install -D -m 755 /opt/supabase/docker/hostbin/supabase-upgrade.sh /usr/local/bin/supabase-upgrade.sh
+
+cat > /etc/systemd/system/supabase-upgrade.service <<'UPGRADESVC'
+[Unit]
+Description=SupaFast service upgrade executor
+After=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/supabase/docker
+ExecStart=/usr/local/bin/supabase-upgrade.sh
+UPGRADESVC
+
+cat > /etc/systemd/system/supabase-upgrade.path <<'UPGRADEPATH'
+[Unit]
+Description=Watch upgrade request file
+
+[Path]
+PathModified=/opt/supabase/docker/upgrade/request.json
+Unit=supabase-upgrade.service
+
+[Install]
+WantedBy=multi-user.target
+UPGRADEPATH
+
+systemctl daemon-reload
+systemctl enable --now supabase-upgrade.path
+
+# ── Key rotation host script ───────────────────────────────────────────────────
+install -D -m 755 /opt/supabase/docker/hostbin/supabase-rotate-keys.sh /usr/local/bin/supabase-rotate-keys.sh
+
+cat > /etc/systemd/system/supabase-rotate.service <<'ROTATESVC'
+[Unit]
+Description=SupaFast key rotation executor
+After=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/supabase/docker
+ExecStart=/usr/local/bin/supabase-rotate-keys.sh
+ROTATESVC
+
+cat > /etc/systemd/system/supabase-rotate.path <<'ROTATEPATH'
+[Unit]
+Description=Watch key rotation request file
+
+[Path]
+PathModified=/opt/supabase/docker/upgrade/rotate-request.json
+Unit=supabase-rotate.service
+
+[Install]
+WantedBy=multi-user.target
+ROTATEPATH
+
+systemctl daemon-reload
+systemctl enable --now supabase-rotate.path
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # PHASE 3: S3 BACKUP SETUP
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2590,9 +3028,14 @@ cleanup_secrets
 echo "DEPLOY_COMPLETED_AT:$(date -Iseconds)"
 `;
 
+  // Minify the script outside heredoc bodies (strip full-line comments and
+  // collapse blank lines) to fit Hetzner's 32 KiB user_data cap. Heredoc
+  // contents must be preserved byte-for-byte.
+  const minified = minifyBashOutsideHeredocs(script);
+
   // Check if script exceeds 32KB and gzip if needed
-  const scriptBytes = new TextEncoder().encode(script);
-  if (scriptBytes.length > 32000) {
+  const scriptBytes = new TextEncoder().encode(minified);
+  if (scriptBytes.length > 16000) {
     // Gzip the entire script and return as base64 — cloud-init auto-detects gzip
     const gzipped = await gzipAndBase64(scriptBytes);
     // cloud-init accepts gzipped user-data with Content-Type or auto-detection
@@ -2606,5 +3049,42 @@ echo '${gzipped}' | base64 -d | gzip -d | bash
 `;
   }
 
-  return script;
+  return minified;
+}
+
+// Strip comment-only lines (except shebang) and collapse blank runs, while
+// passing heredoc bodies through untouched. Tracks <<'DELIM' and <<DELIM so
+// payload blobs like PAYLOAD_EOF stay exact.
+function minifyBashOutsideHeredocs(script) {
+  const lines = script.split('\n');
+  const out = [];
+  let heredocDelim = null;
+  let prevBlank = false;
+  for (const line of lines) {
+    if (heredocDelim !== null) {
+      out.push(line);
+      if (line === heredocDelim) heredocDelim = null;
+      continue;
+    }
+    // Detect start of a heredoc on this line: `<<'DELIM'`, `<<"DELIM"`, `<<-DELIM`, `<<DELIM`
+    const hd = line.match(/<<-?\s*['"]?([A-Za-z_][A-Za-z0-9_]*)['"]?\s*$/);
+    if (hd) {
+      out.push(line);
+      heredocDelim = hd[1];
+      prevBlank = false;
+      continue;
+    }
+    // Outside heredoc: strip comment-only lines (keep shebang and inline comments on code lines)
+    if (/^\s*#/.test(line) && !line.startsWith('#!')) continue;
+    // Collapse consecutive blank lines
+    if (line.trim() === '') {
+      if (prevBlank) continue;
+      prevBlank = true;
+      out.push(line);
+      continue;
+    }
+    prevBlank = false;
+    out.push(line);
+  }
+  return out.join('\n');
 }

@@ -105,6 +105,52 @@ async function generateJwt(secret, role) {
   return `${header}.${payload}.${sig}`;
 }
 
+// ─── New-format Supabase keys (asymmetric JWT + opaque API keys) ─────────────
+// See https://supabase.com/docs/guides/self-hosting/self-hosted-auth-keys
+
+// ECDSA P-256 keypair as JWKs. GoTrue consumes the private JWK via JWT_KEYS;
+// verifiers (PostgREST, Storage, Realtime) consume the public JWK via JWT_JWKS.
+async function generateEcdsaKeypair() {
+  const keyPair = await crypto.subtle.generateKey(
+    { name: "ECDSA", namedCurve: "P-256" },
+    true,
+    ["sign", "verify"]
+  );
+  const [privateJwk, publicJwk] = await Promise.all([
+    crypto.subtle.exportKey("jwk", keyPair.privateKey),
+    crypto.subtle.exportKey("jwk", keyPair.publicKey),
+  ]);
+  const kid = crypto.randomUUID();
+  const base = { kty: "EC", crv: "P-256", alg: "ES256", use: "sig", kid };
+  // GoTrue's JwtKeysDecoder (internal/conf/jwk.go) requires exactly one entry
+  // in GOTRUE_JWT_KEYS to carry `key_ops: ["sign"]` — that's the signing key.
+  // Without it, auth boots with `fatal: no signing key detected`.
+  return {
+    privateJwk: { ...base, key_ops: ["sign"], x: privateJwk.x, y: privateJwk.y, d: privateJwk.d },
+    publicJwk: { ...base, key_ops: ["verify"], x: publicJwk.x, y: publicJwk.y },
+    kid,
+  };
+}
+
+// HS256 symmetric key expressed as an oct JWK so it can live inside the same
+// JWK set as the asymmetric key — lets verifiers validate legacy and new
+// tokens from a single JWT_JWKS env var.
+function hs256Jwk(secret) {
+  const bytes = new TextEncoder().encode(secret);
+  let bin = "";
+  for (const b of bytes) bin += String.fromCharCode(b);
+  return { kty: "oct", k: b64url(bin), alg: "HS256", kid: "legacy" };
+}
+
+// Opaque API key (e.g. sb_publishable_<40 chars>). 30 random bytes ≈ 40 b64url.
+function generateOpaqueKey(prefix) {
+  const bytes = new Uint8Array(30);
+  crypto.getRandomValues(bytes);
+  let bin = "";
+  for (const b of bytes) bin += String.fromCharCode(b);
+  return `${prefix}_${b64url(bin)}`;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // SSH KEY GENERATION — ed25519 keypair generated entirely in the browser
 // Outputs proper OpenSSH format compatible with all SSH clients.
@@ -201,14 +247,31 @@ async function generateAllSecrets() {
   const jwtSecret = hex(20);
   const totpRaw = new Uint8Array(20);
   crypto.getRandomValues(totpRaw);
-  const [anonKey, serviceRoleKey] = await Promise.all([
+  const [anonKey, serviceRoleKey, ecKeys] = await Promise.all([
     generateJwt(jwtSecret, "anon"),
     generateJwt(jwtSecret, "service_role"),
+    generateEcdsaKeypair(),
   ]);
+  const legacyJwk = hs256Jwk(jwtSecret);
+  // JWT_KEYS: GoTrue's signing set — just the private EC JWK marked with
+  // key_ops=["sign"]. Legacy HS256 verification is handled separately by
+  // GOTRUE_JWT_SECRET (FindPublicKeyByKid falls through to it when a token's
+  // kid matches GOTRUE_JWT_KEY_ID). Including the HS256 oct here would trip
+  // JwtKeysDecoder.Validate which demands exactly one signing key.
+  // JWT_JWKS: verification-only set for PostgREST/Storage/Realtime — public
+  // EC + HS256 oct so both new and legacy tokens validate through one env var.
+  const jwtKeys = JSON.stringify([ecKeys.privateJwk]);
+  const jwtJwks = JSON.stringify({ keys: [ecKeys.publicJwk, legacyJwk] });
   return {
     jwtSecret,
     anonKey,
     serviceRoleKey,
+    jwtKid: ecKeys.kid,
+    jwtPublicJwk: ecKeys.publicJwk,
+    jwtKeys,
+    jwtJwks,
+    publishableKey: generateOpaqueKey("sb_publishable"),
+    secretKey: generateOpaqueKey("sb_secret"),
     postgresPassword: hex(16),
     secretKeyBase: hex(32),
     vaultEncKey: hex(16),
@@ -427,6 +490,7 @@ export default function SupabaseDeployer() {
     enableAuthelia: true,
     enableRedis: true,
     enableS3Backups: true,
+    postgresVersion: "15",
     s3Bucket: "",
     s3Region: "us-east-1",
     s3AccessKey: "",
@@ -662,11 +726,17 @@ export default function SupabaseDeployer() {
       `Deploy User: ${config.deployUser}`,
       `SSH: ssh ${config.deployUser}@${serverIp}`,
       ``,
-      `## Supabase Secrets`,
+      `## Supabase Secrets — legacy HS256 keys`,
       `JWT_SECRET=${secrets.jwtSecret}`,
       `ANON_KEY=${secrets.anonKey}`,
       `SERVICE_ROLE_KEY=${secrets.serviceRoleKey}`,
+      ``,
+      `## Supabase Secrets — new-format keys (ES256 asymmetric JWT + opaque API keys)`,
+      `SUPABASE_PUBLISHABLE_KEY=${secrets.publishableKey}`,
+      `SUPABASE_SECRET_KEY=${secrets.secretKey}`,
+      `JWT_KID=${secrets.jwtKid}`,
       `POSTGRES_PASSWORD=${secrets.postgresPassword}`,
+      `POSTGRES_VERSION=${config.postgresVersion}`,
       ``,
       ...(config.enableS3Backups
         ? [
@@ -991,6 +1061,11 @@ export default function SupabaseDeployer() {
                   on={config.enableS3Backups}
                   set={(v) => update("enableS3Backups", v)}
                 />
+                <Toggle
+                  label="PostgreSQL 17 (beta)"
+                  on={config.postgresVersion === "17"}
+                  set={(v) => update("postgresVersion", v ? "17" : "15")}
+                />
               </div>
               {!config.enableAuthelia && (
                 <div style={{ fontSize: 11, color: C.dim, marginTop: -8, marginBottom: 16 }}>
@@ -1062,6 +1137,8 @@ export default function SupabaseDeployer() {
                   ["Auth", config.enableAuthelia ? `Authelia 2FA (user: ${config.supabaseUser})` : `Basic Auth (user: ${config.supabaseUser})`],
                   ["Redis", config.enableRedis ? "Enabled (session store)" : "Disabled"],
                   ["Backups", config.enableS3Backups ? `Restic -> S3 (${config.s3Bucket} in ${config.s3Region}), daily 3 AM, encrypted` : "Disabled"],
+                  ["PostgreSQL", config.postgresVersion === "17" ? "17 (beta)" : "15 (stable)"],
+                  ["API Keys", "Legacy (anon/service_role) + new (sb_publishable/sb_secret) — both provisioned"],
                   ["SMTP", config.smtpHost ? `${config.smtpHost}:${config.smtpPort} (${config.smtpSenderName || config.smtpUser})` : "Not configured — email auto-confirm enabled"],
                   ["SSH Access", `User: ${config.deployUser} (root login disabled, key generated in browser)`],
                   ["Management", `${config.domain}/admin/ (protected by ${config.enableAuthelia ? 'Authelia' : 'Basic Auth'})`],
@@ -1230,9 +1307,12 @@ export default function SupabaseDeployer() {
                   ["SSH", `ssh ${config.deployUser}@${serverIp}`],
                   ["Deploy User", config.deployUser],
                   ["Username", config.supabaseUser],
-                  ["JWT Secret", secrets?.jwtSecret],
-                  ["Anon Key", secrets?.anonKey],
-                  ["Service Role Key", secrets?.serviceRoleKey],
+                  ["JWT Secret (legacy HS256)", secrets?.jwtSecret],
+                  ["Anon Key (legacy)", secrets?.anonKey],
+                  ["Service Role Key (legacy)", secrets?.serviceRoleKey],
+                  ["Publishable Key (new)", secrets?.publishableKey],
+                  ["Secret Key (new)", secrets?.secretKey],
+                  ["JWT Key ID (ES256)", secrets?.jwtKid],
                   ["Postgres Password", secrets?.postgresPassword],
                   ...(config.enableS3Backups
                     ? [

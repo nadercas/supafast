@@ -118,6 +118,8 @@
   <div class="tab" data-tab="security">Security</div>
   <div class="tab" data-tab="logs">Logs</div>
   <div class="tab" data-tab="secrets">Secrets</div>
+  <div class="tab" data-tab="upgrades">Upgrades</div>
+  <div class="tab" data-tab="keys">Keys</div>
 </div>
 
 <div class="content">
@@ -151,6 +153,7 @@
   <!-- Backups -->
   <div class="panel" id="panel-backups">
     <div id="backupStatus" style="margin-bottom:16px"></div>
+
     <h3 class="section-title">Snapshots</h3>
     <div class="card" style="padding:0;overflow:hidden">
       <table>
@@ -234,6 +237,87 @@ restic restore &lt;snapshot-id&gt; --target "$RESTORE_DIR"</pre>
     </div>
   </div>
 
+  <!-- Upgrades -->
+  <div class="panel" id="panel-upgrades">
+    <h3 class="section-title">Service Upgrades</h3>
+    <div class="card mb-16">
+      <p style="margin:0 0 8px 0;font-size:13px;color:var(--muted)">
+        Upgrade stateless Supabase services to newer tags from Docker Hub. Each upgrade runs a <code>pg_dumpall</code> first (kept 14 days at <code>/var/backups/supabase/pre-upgrade/</code>), then pulls the new image, recreates the container, and auto-rolls back if it fails a 90-second healthcheck. Postgres upgrades are not exposed here.
+      </p>
+    </div>
+    <div id="upgradeStatusBanner" style="display:none" class="card mb-16"></div>
+    <div id="upgradeFailureDetails" style="display:none" class="card mb-16">
+      <div class="flex-between" style="margin-bottom:8px">
+        <strong style="font-size:13px">Failure diagnostics</strong>
+        <button class="btn btn-sm" onclick="refreshUpgradeLogs()">Refresh</button>
+      </div>
+      <details open style="margin-bottom:8px">
+        <summary style="cursor:pointer;font-size:12px;color:var(--muted)">Container logs at failure (root cause usually here)</summary>
+        <pre class="log-output" id="upgradeFailureLog" style="max-height:300px;margin-top:8px">Loading...</pre>
+      </details>
+      <details>
+        <summary style="cursor:pointer;font-size:12px;color:var(--muted)">Upgrade script log (pull, healthcheck decisions)</summary>
+        <pre class="log-output" id="upgradeScriptLog" style="max-height:240px;margin-top:8px">Loading...</pre>
+      </details>
+    </div>
+    <div class="card" style="padding:0;overflow:hidden">
+      <table>
+        <thead><tr><th>Service</th><th>Current tag</th><th>Latest available</th><th style="width:160px">Action</th></tr></thead>
+        <tbody id="upgradesTable"><tr><td colspan="4" style="color:var(--muted);text-align:center;padding:16px">Loading...</td></tr></tbody>
+      </table>
+    </div>
+    <h3 class="section-title mt-16">Pre-upgrade pg_dumps</h3>
+    <div class="card" style="padding:0;overflow:hidden">
+      <table>
+        <thead><tr><th>File</th><th>Size</th><th>Created</th></tr></thead>
+        <tbody id="dumpsTable"><tr><td colspan="3" style="color:var(--muted);text-align:center;padding:16px">None yet</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Keys (new-format rotation) -->
+  <div class="panel" id="panel-keys">
+    <h3 class="section-title">API Key Rotation</h3>
+    <div class="card mb-16">
+      <p style="margin:0 0 8px 0;font-size:13px;color:var(--muted)">
+        Rotates the new-format keys: generates a fresh ES256 keypair (new <code>kid</code>) plus new <code>sb_publishable_</code> / <code>sb_secret_</code> opaque keys. Old keys stay valid until you finalize them — migrate your clients first, then remove old entries. Legacy HS256 keys (<code>ANON_KEY</code>, <code>SERVICE_ROLE_KEY</code>) are never rotated here.
+      </p>
+      <button class="btn btn-green" onclick="rotateKeys()">Rotate now</button>
+    </div>
+    <div id="rotateStatusBanner" style="display:none" class="card mb-16"></div>
+    <h3 class="section-title">Current keys (copy into your app)</h3>
+    <div class="card mb-16" id="currentKeysCard">
+      <div style="display:flex;flex-direction:column;gap:10px;font-size:12px">
+        <div>
+          <div style="color:var(--muted);margin-bottom:4px">SUPABASE_URL <span style="font-size:10px">(browser + server)</span></div>
+          <div style="display:flex;gap:6px;align-items:center"><code id="curUrl" style="flex:1;padding:6px 8px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-sm);word-break:break-all">…</code><button class="btn btn-sm" onclick="copyCur('curUrl')">Copy</button></div>
+        </div>
+        <div>
+          <div style="color:var(--muted);margin-bottom:4px">SUPABASE_PUBLISHABLE_KEY <span style="font-size:10px">(browser-safe, replaces anon key)</span></div>
+          <div style="display:flex;gap:6px;align-items:center"><code id="curPub" style="flex:1;padding:6px 8px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-sm);word-break:break-all">…</code><button class="btn btn-sm" onclick="copyCur('curPub')">Copy</button></div>
+        </div>
+        <div>
+          <div style="color:var(--muted);margin-bottom:4px">SUPABASE_SECRET_KEY <span style="font-size:10px;color:var(--red)">(server-only, replaces service_role key)</span></div>
+          <div style="display:flex;gap:6px;align-items:center"><code id="curSec" data-real="" style="flex:1;padding:6px 8px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-sm);word-break:break-all;font-family:monospace">••••••••</code><button class="btn btn-sm" onclick="toggleSecret()" id="curSecToggle">Reveal</button><button class="btn btn-sm" onclick="copyCur('curSec', true)">Copy</button></div>
+        </div>
+      </div>
+    </div>
+    <div class="card mb-16">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+        <div style="color:var(--muted);font-size:12px">Drop into your app's <code>.env</code></div>
+        <button class="btn btn-sm" onclick="copyEnvSnippet()">Copy snippet</button>
+      </div>
+      <pre id="envSnippet" style="margin:0;padding:10px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-sm);font-size:12px;white-space:pre-wrap;word-break:break-all">Loading…</pre>
+    </div>
+    <h3 class="section-title">Active keys</h3>
+    <div class="card" style="padding:0;overflow:hidden">
+      <table>
+        <thead><tr><th>Key ID (kid)</th><th>Publishable prefix</th><th>Created</th><th style="width:100px">Actions</th></tr></thead>
+        <tbody id="keysTable"><tr><td colspan="4" style="color:var(--muted);text-align:center;padding:16px">Loading...</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
   <!-- Logs -->
   <div class="panel" id="panel-logs">
     <div class="flex-between">
@@ -263,6 +347,32 @@ restic restore &lt;snapshot-id&gt; --target "$RESTORE_DIR"</pre>
     </div>
     <div class="modal-body">
       <pre class="log-output" id="logModalContent">Loading...</pre>
+    </div>
+  </div>
+</div>
+
+<!-- New keys reveal modal -->
+<div class="modal-overlay" id="newKeysModal">
+  <div class="modal">
+    <div class="modal-header">
+      <h2>Save these keys now</h2>
+      <button class="modal-close" onclick="document.getElementById('newKeysModal').classList.remove('active')">&times;</button>
+    </div>
+    <div class="modal-body">
+      <p style="color:var(--yellow);font-size:13px;margin-top:0">⚠ The secret key will not be shown again. Copy both values and update your clients before closing this dialog.</p>
+      <div style="margin-bottom:12px">
+        <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:4px">Key ID (kid)</label>
+        <code id="newKid" style="display:block;padding:8px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-sm);word-break:break-all"></code>
+      </div>
+      <div style="margin-bottom:12px">
+        <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:4px">Publishable key</label>
+        <code id="newPub" style="display:block;padding:8px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-sm);word-break:break-all"></code>
+      </div>
+      <div style="margin-bottom:12px">
+        <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:4px">Secret key</label>
+        <code id="newSec" style="display:block;padding:8px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-sm);word-break:break-all"></code>
+      </div>
+      <button class="btn btn-green" onclick="copyNewKeys()">Copy both to clipboard</button>
     </div>
   </div>
 </div>
@@ -652,7 +762,266 @@ function loadTab(tab) {
     case 'secrets':
       loadSecrets();
       break;
+    case 'upgrades':
+      loadUpgrades();
+      refreshTimer = setInterval(pollUpgradeStatus, 3000);
+      break;
+    case 'keys':
+      loadKeys();
+      refreshTimer = setInterval(pollRotateStatus, 3000);
+      break;
   }
+}
+
+// --- Keys / Rotation ---
+async function loadCurrentKeys() {
+  const cur = await api('/api/keys/current');
+  if (!cur) return;
+  document.getElementById('curUrl').textContent = cur.url || '';
+  document.getElementById('curPub').textContent = cur.publishable_key || '(not set)';
+  const secEl = document.getElementById('curSec');
+  const btn = document.getElementById('curSecToggle');
+  secEl.dataset.real = cur.secret_key || '';
+  // Preserve reveal state across polling refreshes
+  if (btn.textContent === 'Hide') {
+    secEl.textContent = cur.secret_key || '';
+  } else {
+    secEl.textContent = '••••••••';
+  }
+  const snippet =
+    '# Browser / Next.js public\n' +
+    'NEXT_PUBLIC_SUPABASE_URL=' + (cur.url || '') + '\n' +
+    'NEXT_PUBLIC_SUPABASE_ANON_KEY=' + (cur.publishable_key || '') + '\n' +
+    '\n' +
+    '# Server-only\n' +
+    'SUPABASE_SECRET_KEY=' + (cur.secret_key || '') + '\n';
+  const snipEl = document.getElementById('envSnippet');
+  snipEl.dataset.real = snippet;
+  snipEl.textContent = btn.textContent === 'Hide'
+    ? snippet
+    : snippet.replace(/^SUPABASE_SECRET_KEY=.*$/m, 'SUPABASE_SECRET_KEY=••••••••  (click Reveal above)');
+}
+function copyEnvSnippet() {
+  const real = document.getElementById('envSnippet').dataset.real || '';
+  if (!real) return;
+  navigator.clipboard.writeText(real).then(() => toast('Snippet copied', 'info'));
+}
+function toggleSecret() {
+  const el = document.getElementById('curSec');
+  const btn = document.getElementById('curSecToggle');
+  if (btn.textContent === 'Reveal') { el.textContent = el.dataset.real || ''; btn.textContent = 'Hide'; }
+  else { el.textContent = '••••••••'; btn.textContent = 'Reveal'; }
+}
+function copyCur(id, useReal) {
+  const el = document.getElementById(id);
+  const v = useReal ? (el.dataset.real || '') : el.textContent;
+  if (!v) return;
+  navigator.clipboard.writeText(v).then(() => toast('Copied', 'info'));
+}
+
+async function loadKeys() {
+  loadCurrentKeys();
+  const state = await api('/api/rotate-keys/state');
+  const tbody = document.getElementById('keysTable');
+  if (!state || !state.active_keys) {
+    tbody.innerHTML = '<tr><td colspan="4" style="color:var(--muted);text-align:center;padding:16px">Unavailable</td></tr>';
+    return;
+  }
+  const keys = state.active_keys;
+  if (!keys.length) {
+    tbody.innerHTML = '<tr><td colspan="4" style="color:var(--muted);text-align:center;padding:16px">No active new-format keys (rotate to seed)</td></tr>';
+  } else {
+    const onlyOne = keys.length === 1;
+    tbody.innerHTML = keys.map((k, i) => {
+      const isNewest = i === keys.length - 1;
+      const btn = onlyOne
+        ? '<span style="font-size:11px;color:var(--muted)">only key</span>'
+        : `<button class="btn btn-sm btn-red" onclick="finalizeKid('${esc(k.kid)}')"${isNewest ? ' disabled title="Cannot remove newest — rotate first"' : ''}>Remove</button>`;
+      return `<tr>
+        <td><code style="font-size:11px">${esc(k.kid)}</code>${isNewest ? ' <span style="font-size:10px;color:var(--green)">NEWEST</span>' : ''}</td>
+        <td><code style="font-size:11px">${esc(k.publishable_prefix)}</code></td>
+        <td>${esc(k.created_at === 'deploy' ? 'at deploy' : (k.created_at ? timeAgo(k.created_at) : '?'))}</td>
+        <td>${btn}</td>
+      </tr>`;
+    }).join('');
+  }
+  pollRotateStatus();
+}
+
+let _pendingCopy = null;
+
+async function rotateKeys() {
+  if (!confirm('Generate a new ES256 keypair + sb_publishable/sb_secret? Old keys will keep working until you finalize them.')) return;
+  const data = await api('/api/rotate-keys', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: '{}',
+  });
+  if (!data || !data.success) return;
+  document.getElementById('newKid').textContent = data.kid;
+  document.getElementById('newPub').textContent = data.publishable_key;
+  document.getElementById('newSec').textContent = data.secret_key;
+  _pendingCopy = `SUPABASE_PUBLISHABLE_KEY=${data.publishable_key}\nSUPABASE_SECRET_KEY=${data.secret_key}\n# kid: ${data.kid}`;
+  document.getElementById('newKeysModal').classList.add('active');
+  toast('Rotation queued — applying in ~5s', 'info');
+  setTimeout(loadKeys, 5000);
+}
+
+function copyNewKeys() {
+  if (!_pendingCopy) return;
+  navigator.clipboard.writeText(_pendingCopy).then(() => toast('Copied', 'info'));
+}
+
+async function finalizeKid(kid) {
+  if (!confirm(`Remove key ${kid}? Clients still using it will break. Make sure you have migrated everything to a newer key.`)) return;
+  const data = await api('/api/rotate-keys/finalize/' + encodeURIComponent(kid), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: '{}',
+  });
+  if (data && data.success) {
+    toast('Finalize queued', 'info');
+    setTimeout(loadKeys, 5000);
+  }
+}
+
+async function pollRotateStatus() {
+  const data = await api('/api/rotate-keys/status');
+  const banner = document.getElementById('rotateStatusBanner');
+  if (!data || data.status === 'idle') { banner.style.display = 'none'; return; }
+  banner.style.display = 'block';
+  const color = { ok: 'var(--green)', error: 'var(--red)', pending: 'var(--blue)' }[data.status] || 'var(--muted)';
+  banner.innerHTML = `<div style="display:flex;gap:12px;align-items:center">
+    <span style="width:8px;height:8px;border-radius:50%;background:${color};display:inline-block"></span>
+    <div>
+      <div><strong>${esc(data.action || '?')}</strong>${data.kid ? ' · <code>' + esc(data.kid) + '</code>' : ''} · <span style="color:${color}">${esc(data.status)}</span></div>
+      <div style="font-size:12px;color:var(--muted);margin-top:2px">${esc(data.message || '')} · ${esc(data.at ? timeAgo(data.at) : '')}</div>
+    </div>
+  </div>`;
+  if (data.status === 'ok' && activeTab === 'keys') loadKeys();
+}
+
+// --- Upgrades ---
+let upgradeTagCache = {};
+
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, (c) =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+}
+
+async function loadUpgrades() {
+  const [current, dumps] = await Promise.all([
+    api('/api/upgrade/current'),
+    api('/api/upgrade/dumps'),
+  ]);
+  renderUpgradeTable(current ? current.services : {});
+  renderDumps(dumps ? dumps.dumps : []);
+  if (current) {
+    for (const svc of Object.keys(current.services)) {
+      api('/api/upgrade/tags/' + svc).then((data) => {
+        if (!data || !data.tags || !data.tags.length) return;
+        upgradeTagCache[svc] = data;
+        renderUpgradeTable(current.services);
+      });
+    }
+  }
+}
+
+function renderUpgradeTable(services) {
+  const tbody = document.getElementById('upgradesTable');
+  const rows = Object.entries(services).map(([svc, info]) => {
+    const cache = upgradeTagCache[svc];
+    const latest = cache && cache.tags[0] ? esc(cache.tags[0].name) : '<span style="color:var(--muted)">loading...</span>';
+    const isCurrent = cache && cache.tags[0] && cache.tags[0].name === info.tag;
+    const tagOptions = cache ? cache.tags.slice(0, 20).map(t => {
+      const name = esc(t.name);
+      return `<option value="${name}"${t.name === info.tag ? ' selected' : ''}>${name}</option>`;
+    }).join('') : '';
+    const selector = cache
+      ? `<select id="tag-${esc(svc)}" style="padding:4px 6px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text);font-size:12px;max-width:110px">${tagOptions}</select>`
+      : '';
+    const btn = cache
+      ? `<button class="btn btn-sm btn-green" onclick="startUpgrade('${esc(svc)}')"${isCurrent ? ' disabled' : ''}>Upgrade</button>`
+      : '';
+    return `<tr>
+      <td><strong>${esc(svc)}</strong></td>
+      <td><code>${esc(info.tag || '?')}</code></td>
+      <td>${latest}</td>
+      <td style="display:flex;gap:6px;align-items:center">${selector}${btn}</td>
+    </tr>`;
+  }).join('');
+  tbody.innerHTML = rows || '<tr><td colspan="4" style="color:var(--muted);text-align:center;padding:16px">No services</td></tr>';
+}
+
+function renderDumps(dumps) {
+  const tbody = document.getElementById('dumpsTable');
+  if (!dumps.length) {
+    tbody.innerHTML = '<tr><td colspan="3" style="color:var(--muted);text-align:center;padding:16px">None yet</td></tr>';
+    return;
+  }
+  tbody.innerHTML = dumps.map(d => `<tr>
+    <td><code style="font-size:11px">${esc(d.name)}</code></td>
+    <td>${esc(formatBytesRaw(d.size))}</td>
+    <td>${esc(timeAgo(d.mtime))}</td>
+  </tr>`).join('');
+}
+
+async function startUpgrade(service) {
+  const sel = document.getElementById('tag-' + service);
+  const target = sel ? sel.value : '';
+  if (!target) return toast('Pick a tag first', 'error');
+  if (!confirm(`Upgrade ${service} to ${target}? This will pg_dump, pull the image, and recreate the container with auto-rollback on failure.`)) return;
+  const result = await api('/api/upgrade/' + service, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ target }),
+  });
+  if (result && result.success) {
+    toast(`Queued upgrade of ${service} → ${target}`, 'info');
+    pollUpgradeStatus();
+  }
+}
+
+async function pollUpgradeStatus() {
+  const data = await api('/api/upgrade/status');
+  const banner = document.getElementById('upgradeStatusBanner');
+  const fail = document.getElementById('upgradeFailureDetails');
+  if (!data || data.status === 'idle') {
+    banner.style.display = 'none';
+    fail.style.display = 'none';
+    return;
+  }
+  banner.style.display = 'block';
+  const color = { ok: 'var(--green)', error: 'var(--red)', rolled_back: 'var(--yellow)', pending: 'var(--blue)' }[data.status] || 'var(--muted)';
+  banner.innerHTML = `<div style="display:flex;gap:12px;align-items:center">
+    <span style="width:8px;height:8px;border-radius:50%;background:${color};display:inline-block"></span>
+    <div>
+      <div><strong>${esc(data.service || '—')}</strong> · <code>${esc(data.from || '?')}</code> → <code>${esc(data.to || '?')}</code> · <span style="color:${color}">${esc(data.status)}</span></div>
+      <div style="font-size:12px;color:var(--muted);margin-top:2px">${esc(data.message || '')} · ${esc(data.at ? timeAgo(data.at) : '')}</div>
+    </div>
+  </div>`;
+  if (data.status === 'error' || data.status === 'rolled_back') {
+    fail.style.display = 'block';
+    refreshUpgradeLogs();
+  } else {
+    fail.style.display = 'none';
+  }
+  if (data.status !== 'pending' && activeTab === 'upgrades' && lastPollStatus === 'pending') {
+    loadUpgrades();
+  }
+  lastPollStatus = data.status;
+}
+let lastPollStatus = null;
+
+async function refreshUpgradeLogs() {
+  const [failure, script] = await Promise.all([
+    api('/api/upgrade/last-failure'),
+    api('/api/upgrade/log'),
+  ]);
+  const failEl = document.getElementById('upgradeFailureLog');
+  const scriptEl = document.getElementById('upgradeScriptLog');
+  failEl.textContent = failure && failure.log ? failure.log : (failure && failure.exists === false ? '(no container logs captured)' : 'Unavailable');
+  scriptEl.textContent = script && script.log ? script.log : 'Unavailable';
 }
 
 // Close modal on overlay click
