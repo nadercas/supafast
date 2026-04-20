@@ -40,12 +40,77 @@ function rateLimit(req, method) {
   return true;
 }
 
-function audit(req, action, target, result, extra) {
+// UA parser: extracts browser + os/device from a User-Agent string.
+// Deliberately minimal — avoids a dependency for one feature.
+function parseUA(ua) {
+  if (!ua) return { browser: '', device: '' };
+  let browser = 'Unknown';
+  if (/Edg\//.test(ua)) browser = 'Edge';
+  else if (/OPR\/|Opera/.test(ua)) browser = 'Opera';
+  else if (/Firefox\//.test(ua)) browser = 'Firefox';
+  else if (/Chrome\//.test(ua)) browser = 'Chrome';
+  else if (/Safari\//.test(ua)) browser = 'Safari';
+  else if (/curl\//i.test(ua)) browser = 'curl';
+  else if (/wget/i.test(ua)) browser = 'wget';
+  let device = 'Unknown';
+  if (/iPhone|iPad/.test(ua)) device = /iPad/.test(ua) ? 'iPad' : 'iPhone';
+  else if (/Android/.test(ua)) device = 'Android';
+  else if (/Mac OS X/.test(ua)) device = 'Mac';
+  else if (/Windows/.test(ua)) device = 'Windows';
+  else if (/Linux/.test(ua)) device = 'Linux';
+  return { browser, device };
+}
+
+function realIp(req) {
+  const xff = req.headers['x-forwarded-for'];
+  if (xff) return String(xff).split(',')[0].trim();
+  return req.socket.remoteAddress || '';
+}
+
+// In-memory geo cache: ip → { city, country, ts }. TTL 24h.
+const geoCache = new Map();
+const GEO_TTL = 24 * 60 * 60 * 1000;
+function geoLookup(ip) {
+  return new Promise((resolve) => {
+    if (!ip || ip === '127.0.0.1' || ip.startsWith('10.') || ip.startsWith('192.168.') || ip.startsWith('172.')) {
+      return resolve({ city: '', country: 'Local' });
+    }
+    const cached = geoCache.get(ip);
+    if (cached && Date.now() - cached.ts < GEO_TTL) return resolve(cached);
+    const https = require('https');
+    const req = https.get(`https://ipapi.co/${encodeURIComponent(ip)}/json/`, { timeout: 2000 }, (res) => {
+      let data = '';
+      res.on('data', (c) => (data += c));
+      res.on('end', () => {
+        try {
+          const j = JSON.parse(data);
+          const entry = { city: j.city || '', country: j.country_name || j.country || '', ts: Date.now() };
+          geoCache.set(ip, entry);
+          resolve(entry);
+        } catch {
+          resolve({ city: '', country: '' });
+        }
+      });
+    });
+    req.on('error', () => resolve({ city: '', country: '' }));
+    req.on('timeout', () => { req.destroy(); resolve({ city: '', country: '' }); });
+  });
+}
+
+async function audit(req, action, target, result, extra) {
   try {
+    const ip = realIp(req);
+    const ua = req.headers['user-agent'] || '';
+    const { browser, device } = parseUA(ua);
+    const geo = await geoLookup(ip).catch(() => ({ city: '', country: '' }));
     const entry = {
       ts: new Date().toISOString(),
       user: req.headers['remote-user'] || 'unknown',
-      ip: req.socket.remoteAddress || '',
+      ip,
+      city: geo.city,
+      country: geo.country,
+      browser,
+      device,
       action,
       target: target || '',
       result: result || 'ok',
@@ -736,13 +801,22 @@ function containerNameFor(service) {
   return SERVICE_TO_CONTAINER[service] || `supabase-${service}`;
 }
 
+// Infrastructure services — hardcoded images in compose.yml (not env-driven).
+// We show them in the pin table so the user sees they're also pinned.
+const INFRA_SERVICES = [
+  { service: 'db', container: 'supabase-db' },
+  { service: 'caddy', container: 'caddy-container' },
+  { service: 'authelia', container: 'authelia' },
+  { service: 'redis', container: 'redis' },
+  { service: 'management', container: 'supabase-management' },
+  { service: 'socket-proxy', container: 'docker-socket-proxy' },
+];
+
 async function handleImageDigests(req, res) {
-  // For each upgradable service, returns {service, image, isPinned, digest, shortDigest}.
-  // Digest is the sha256 of the local image (from container .Image). If the
-  // env value contains '@sha256:' we consider it pinned.
   const out = [];
   try {
     const env = readTopEnv();
+    // Env-driven services
     for (const service of UPGRADABLE_SERVICES) {
       const image = env.get(imageEnvKey(service)) || '';
       const isPinned = image.includes('@sha256:');
@@ -752,7 +826,20 @@ async function handleImageDigests(req, res) {
         const r = await dockerRequest('GET', `/containers/${encodeURIComponent(cname)}/json`);
         if (r.status === 200 && r.data && r.data.Image) digest = r.data.Image;
       } catch {}
-      out.push({ service, image, isPinned, digest, shortDigest: digest ? digest.slice(7, 19) : '' });
+      out.push({ service, image, isPinned, digest, shortDigest: digest ? digest.slice(7, 19) : '', source: 'env' });
+    }
+    // Infrastructure services — read current image directly from the container's .Config.Image
+    for (const { service, container } of INFRA_SERVICES) {
+      let image = '', digest = '', isPinned = false;
+      try {
+        const r = await dockerRequest('GET', `/containers/${encodeURIComponent(container)}/json`);
+        if (r.status === 200 && r.data) {
+          image = r.data.Config && r.data.Config.Image || '';
+          digest = r.data.Image || '';
+          isPinned = image.includes('@sha256:');
+        }
+      } catch {}
+      out.push({ service, image, isPinned, digest, shortDigest: digest ? digest.slice(7, 19) : '', source: 'compose' });
     }
     sendJson(res, { services: out });
   } catch (e) {
