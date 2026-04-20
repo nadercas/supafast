@@ -1031,6 +1031,27 @@ function readInitialKeyFromEnv() {
   }
 }
 
+function handleMcp(req, res) {
+  const serverName = SERVER_NAME || process.env.SERVER_NAME || 'supabase';
+  const deployUser = process.env.DEPLOY_USER || 'nader';
+  const url = process.env.SUPABASE_PUBLIC_URL || '';
+  const host = url.replace(/^https?:\/\//, '').replace(/\/$/, '');
+  const config = {
+    mcpServers: {
+      [`supabase-${serverName}`]: {
+        command: 'ssh',
+        args: [
+          '-i', `~/.ssh/${serverName}`,
+          '-o', 'StrictHostKeyChecking=accept-new',
+          `${deployUser}@${host}`,
+          `/home/${deployUser}/bin/supabase-mcp`,
+        ],
+      },
+    },
+  };
+  sendJson(res, { serverName, deployUser, host, config });
+}
+
 function handleKeysCurrent(req, res) {
   try {
     const envPath = path.join(SUPABASE_DIR, '.env');
@@ -1290,6 +1311,9 @@ const server = http.createServer(async (req, res) => {
     }
     if (urlPath === '/api/keys/current' && method === 'GET') {
       return handleKeysCurrent(req, res);
+    }
+    if (urlPath === '/api/mcp' && method === 'GET') {
+      return handleMcp(req, res);
     }
     const finalizeMatch = urlPath.match(/^\/api\/rotate-keys\/finalize\/([a-f0-9-]+)$/i);
     if (finalizeMatch && method === 'POST') {

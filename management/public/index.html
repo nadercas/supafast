@@ -150,6 +150,10 @@
       <svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
       <span>Logs</span>
     </div>
+    <div class="nav-item" data-tab="mcp">
+      <svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h10"/><circle cx="18" cy="17" r="2"/></svg>
+      <span>MCP</span>
+    </div>
     <div class="nav-section">Security</div>
     <div class="nav-item" data-tab="security">
       <svg viewBox="0 0 24 24"><path d="M12 2l8 4v6c0 5-3.4 9.4-8 10-4.6-.6-8-5-8-10V6l8-4z"/></svg>
@@ -438,6 +442,27 @@ restic restore &lt;snapshot-id&gt; --target "$RESTORE_DIR"</pre>
     </div>
     <div class="card mt-8">
       <pre class="log-output" id="backupLog" style="max-height:400px">Loading...</pre>
+    </div>
+  </div>
+
+  <!-- MCP -->
+  <div class="panel" id="panel-mcp">
+    <h3 class="section-title" style="margin:0 0 12px">Claude MCP config</h3>
+    <div class="card mb-16" style="font-size:13px;line-height:1.6">
+      Paste this into <code>~/.claude/mcp.json</code> (or Cursor / Windsurf MCP settings). It connects Claude to this server's Supabase MCP over SSH stdio — no open ports.
+    </div>
+    <div class="card mb-16">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+        <div style="color:var(--muted);font-size:12px">mcp.json</div>
+        <button class="btn btn-sm btn-green" onclick="copyMcp()">Copy</button>
+      </div>
+      <pre id="mcpConfig" style="margin:0;padding:10px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-sm);font-size:12px;white-space:pre-wrap;word-break:break-all">Loading…</pre>
+    </div>
+    <div class="card" style="font-size:12px;color:var(--muted);line-height:1.6">
+      <strong style="color:var(--text)">Prerequisites</strong><br>
+      1. Your SSH private key is saved at <code id="mcpKeyPath">~/.ssh/…</code> with <code>chmod 600</code><br>
+      2. You've SSHed in at least once so the host key is trusted<br>
+      3. Restart your MCP client after editing <code>mcp.json</code>
     </div>
   </div>
 
@@ -935,7 +960,25 @@ function loadTab(tab) {
       loadKeys();
       refreshTimer = setInterval(pollRotateStatus, 3000);
       break;
+    case 'mcp':
+      loadMcp();
+      break;
   }
+}
+
+// --- MCP ---
+async function loadMcp() {
+  const data = await api('/api/mcp');
+  const el = document.getElementById('mcpConfig');
+  if (!data) { el.textContent = 'Failed to load'; return; }
+  el.textContent = JSON.stringify(data.config, null, 2);
+  const kp = document.getElementById('mcpKeyPath');
+  if (kp) kp.textContent = `~/.ssh/${data.serverName}`;
+}
+function copyMcp() {
+  const v = document.getElementById('mcpConfig').textContent;
+  if (!v || v === 'Loading…') return;
+  navigator.clipboard.writeText(v).then(() => toast('MCP config copied', 'info'));
 }
 
 // --- Keys / Rotation ---

@@ -1584,6 +1584,7 @@ MINIO_ROOT_PASSWORD=${secrets.minioRootPassword}
 # Server
 ############
 SERVER_NAME=${config.serverName}
+DEPLOY_USER=${config.deployUser}
 
 ############
 # Service image pins (edited by management panel upgrade flow)
@@ -2128,6 +2129,8 @@ services:
       DOCKER_HOST: tcp://docker-socket-proxy:2375
       SUPABASE_DIR: /supabase
       SERVER_NAME: \${SERVER_NAME}
+      DEPLOY_USER: \${DEPLOY_USER}
+      SUPABASE_PUBLIC_URL: \${SUPABASE_PUBLIC_URL}
       PROXY_SECRET: \${PROXY_SECRET}
       ${config.enableS3Backups ? `RESTIC_REPOSITORY: \${RESTIC_REPOSITORY}
       RESTIC_PASSWORD: \${RESTIC_PASSWORD}
