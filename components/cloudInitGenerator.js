@@ -233,10 +233,6 @@ ts() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 REQ_ID=$(jq -r '.id // ""' "$REQ" 2>/dev/null || echo "")
 echo "[$(ts)] pin-digests request id=$REQ_ID" >> "$LOG"
 
-# All pinnable services. 3 columns: container_name | env_var_in_env (empty
-# if image is hardcoded in compose.yml) | search regex for compose.yml
-# (empty if env-based). ESCAPE regex metachars for grep -E.
-# Format: "container|envkey|compose_regex"
 SERVICES=(
   "supabase-studio|IMAGE_STUDIO|"
   "supabase-kong|IMAGE_KONG|"
@@ -302,12 +298,7 @@ for ROW in "\${SERVICES[@]}"; do
   fi
 done
 
-# Intentionally do NOT run 'docker compose up -d' here. Pins point to the
-# digest of the image already running, so recreating containers changes
-# nothing functional but risks downtime if caddy/management get recycled
-# mid-request (container-self-removal races, Cloudflare 521, etc). The
-# new digests apply naturally on the next deploy/upgrade.
-echo "[$(ts)] $CHANGED pins written; no restart (takes effect on next up)" >> "$LOG"
+echo "[$(ts)] $CHANGED pins written; no restart" >> "$LOG"
 
 STATUS="ok"
 MSG="pinned $CHANGED services"
