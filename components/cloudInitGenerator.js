@@ -146,7 +146,11 @@ esac
 CURRENT=$(grep "^$ENVKEY=" .env | head -n1 | cut -d= -f2-)
 [ -n "$CURRENT" ] || { write_result "error" "$SERVICE" "" "$TARGET" "current image not found in .env"; exit 0; }
 
-REPO="\${CURRENT%:*}"
+case "$CURRENT" in
+  *@sha256:*) REPO="\${CURRENT%@sha256:*}" ;;
+  *:*)        REPO="\${CURRENT%:*}" ;;
+  *)          REPO="$CURRENT" ;;
+esac
 NEW_IMAGE="$REPO:$TARGET"
 
 DUMP_DIR=/var/backups/supabase/pre-upgrade

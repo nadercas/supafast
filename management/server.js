@@ -701,9 +701,11 @@ async function handleUpgradeTags(req, res, service) {
         const cj = await dockerRequest('GET', `/containers/${encodeURIComponent(cname)}/json`);
         const imgId = cj.status === 200 && cj.data && cj.data.Image;
         if (imgId) {
-          const ij = await dockerRequest('GET', `/images/${encodeURIComponent(imgId)}/json`);
-          const tags = ij.status === 200 && ij.data && ij.data.RepoTags || [];
-          const match = tags.find((t) => t.startsWith(repo + ':') && !t.endsWith(':<none>'));
+          // Do NOT encodeURIComponent the image ID — docker API path routing
+          // matches 'sha256:...' literally; '%3A' would 404.
+          const ij = await dockerRequest('GET', `/images/${imgId}/json`);
+          const tagList = ij.status === 200 && ij.data && ij.data.RepoTags || [];
+          const match = tagList.find((t) => t.startsWith(repo + ':') && !t.endsWith(':<none>'));
           if (match) currentTag = match.split(':').slice(1).join(':');
         }
       } catch {}
