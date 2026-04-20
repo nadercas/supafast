@@ -395,6 +395,25 @@ restic restore &lt;snapshot-id&gt; --target "$RESTORE_DIR"</pre>
       </div>
       <pre id="envSnippet" style="margin:0;padding:10px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-sm);font-size:12px;white-space:pre-wrap;word-break:break-all">Loading…</pre>
     </div>
+    <details class="card mb-16" style="padding:0">
+      <summary style="padding:12px 16px;cursor:pointer;user-select:none;display:flex;justify-content:space-between;align-items:center">
+        <span><strong>Legacy keys (HS256)</strong> <span style="font-size:11px;color:var(--muted);margin-left:6px">anon / service_role — kept for backward compatibility</span></span>
+        <span style="font-size:11px;color:var(--muted)">click to reveal</span>
+      </summary>
+      <div style="padding:0 16px 14px 16px;display:flex;flex-direction:column;gap:10px;font-size:12px;border-top:1px solid var(--border)">
+        <div style="color:var(--muted);font-size:11px;margin-top:10px">
+          These still work but are superseded by the publishable/secret keys above. Prefer the new keys in new code.
+        </div>
+        <div>
+          <div style="color:var(--muted);margin-bottom:4px">SUPABASE_ANON_KEY <span style="font-size:10px">(legacy browser-safe)</span></div>
+          <div style="display:flex;gap:6px;align-items:center"><code id="curAnon" data-real="" style="flex:1;padding:6px 8px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-sm);word-break:break-all">••••••••</code><button class="btn btn-sm" onclick="toggleLegacy('curAnon', this)">Reveal</button><button class="btn btn-sm" onclick="copyCur('curAnon', true)">Copy</button></div>
+        </div>
+        <div>
+          <div style="color:var(--muted);margin-bottom:4px">SUPABASE_SERVICE_ROLE_KEY <span style="font-size:10px;color:var(--red)">(legacy server-only)</span></div>
+          <div style="display:flex;gap:6px;align-items:center"><code id="curSrv" data-real="" style="flex:1;padding:6px 8px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-sm);word-break:break-all">••••••••</code><button class="btn btn-sm" onclick="toggleLegacy('curSrv', this)">Reveal</button><button class="btn btn-sm" onclick="copyCur('curSrv', true)">Copy</button></div>
+        </div>
+      </div>
+    </details>
     <h3 class="section-title">Active keys</h3>
     <div class="card" style="padding:0;overflow:hidden">
       <table>
@@ -934,6 +953,14 @@ async function loadCurrentKeys() {
   } else {
     secEl.textContent = '••••••••';
   }
+  // Legacy HS256 keys (accordion)
+  for (const [id, key] of [['curAnon', cur.anon_key], ['curSrv', cur.service_role_key]]) {
+    const el = document.getElementById(id);
+    if (!el) continue;
+    el.dataset.real = key || '';
+    const legBtn = el.parentElement.querySelector('button');
+    el.textContent = (legBtn && legBtn.textContent === 'Hide') ? (key || '') : '••••••••';
+  }
   const snippet =
     '# Browser / Next.js public\n' +
     'NEXT_PUBLIC_SUPABASE_URL=' + (cur.url || '') + '\n' +
@@ -951,6 +978,11 @@ function copyEnvSnippet() {
   const real = document.getElementById('envSnippet').dataset.real || '';
   if (!real) return;
   navigator.clipboard.writeText(real).then(() => toast('Snippet copied', 'info'));
+}
+function toggleLegacy(id, btn) {
+  const el = document.getElementById(id);
+  if (btn.textContent === 'Reveal') { el.textContent = el.dataset.real || ''; btn.textContent = 'Hide'; }
+  else { el.textContent = '••••••••'; btn.textContent = 'Reveal'; }
 }
 function toggleSecret() {
   const el = document.getElementById('curSec');
