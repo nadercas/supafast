@@ -1737,7 +1737,7 @@ IMAGE_FUNCTIONS=supabase/edge-runtime:v1.71.2
 IMAGE_LOGFLARE=supabase/logflare:1.36.1
 IMAGE_VECTOR=timberio/vector:0.28.1-alpine
 IMAGE_SUPAVISOR=supabase/supavisor:2.7.4
-IMAGE_MANAGEMENT=ghcr.io/nadercas/supafast:v1.3
+IMAGE_MANAGEMENT=ghcr.io/nadercas/supafast:v1.4
 ${enableS3Backups ? `
 ############
 # Backups (S3)

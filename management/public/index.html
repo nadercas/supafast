@@ -1331,6 +1331,13 @@ async function loadUpgrades() {
   }
 }
 
+function refreshAdminPanelButton() {
+  const sel = document.getElementById('tag-management');
+  const btn = document.getElementById('tag-management-btn');
+  if (!sel || !btn) return;
+  btn.disabled = sel.value === window._adminPanelCurrentDigest;
+}
+
 async function loadAdminPanelUpgrade(info) {
   const body = document.getElementById('adminPanelUpgradeBody');
   const notice = document.getElementById('adminPanelUpgradeNotice');
@@ -1349,7 +1356,7 @@ async function loadAdminPanelUpgrade(info) {
   upgradeTagCache.management = data;
   const currentLabel = data.currentTag || info.tag || '?';
   const latest = data.tags[0];
-  const isCurrent = data.hasUpdate === false || latest.name === currentLabel;
+  const currentDigestHex = (data.currentDigest || '').replace(/^sha256:/, '');
   const tagOptions = data.tags.slice(0, 20).map(t => {
     const name = esc(t.name);
     const val = esc(t.value != null ? t.value : t.name);
@@ -1361,9 +1368,11 @@ async function loadAdminPanelUpgrade(info) {
       <div>Current: <code>${esc(currentLabel)}</code></div>
       <div style="color:var(--muted)">Latest: <code>${esc(latest.name)}</code></div>
       <div style="flex:1"></div>
-      <select id="tag-management" style="padding:4px 6px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text);font-size:12px;max-width:140px">${tagOptions}</select>
-      <button class="btn btn-sm btn-green" onclick="startUpgrade('management')"${isCurrent ? ' disabled' : ''}>Upgrade</button>
+      <select id="tag-management" onchange="refreshAdminPanelButton()" style="padding:4px 6px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text);font-size:12px;max-width:140px">${tagOptions}</select>
+      <button id="tag-management-btn" class="btn btn-sm btn-green" onclick="startUpgrade('management')">Upgrade</button>
     </div>`;
+  window._adminPanelCurrentDigest = currentDigestHex;
+  refreshAdminPanelButton();
   if (data.hasUpdate) {
     notice.style.display = 'block';
     notice.innerHTML = `<span style="color:#48bb78">●</span> <strong>${esc(latest.name)}</strong> is available. Upgrading is recommended to pick up new features and fixes.`;
