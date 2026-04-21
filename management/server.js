@@ -785,18 +785,18 @@ async function handleUpgradeTags(req, res, service) {
   }
 }
 
-// Management lives on GHCR, not Docker Hub. We surface the current pinned digest
-// and the latest digest available for :latest, with created timestamps for each,
-// so the UI can say "pushed X ago" and flag updates.
+// Management lives on GHCR, not Docker Hub. List version tags via /tags/list,
+// resolve each to its digest + created time, and return them sorted newest first.
+// The UI shows version names (v1.1, v1.0, ...) while the upgrade still pins by
+// digest under the hood.
 async function handleManagementTags(req, res, repo) {
   const repoPath = repo.replace(/^ghcr\.io\//, '');
   try {
     const env = readTopEnv();
     const currentImage = env.get('IMAGE_MANAGEMENT') || '';
     let currentDigest = '';
-    const m = currentImage.match(/@sha256:([a-f0-9]{64})/);
-    if (m) currentDigest = 'sha256:' + m[1];
-    // Current created timestamp from the locally pulled image.
+    const dm = currentImage.match(/@sha256:([a-f0-9]{64})/);
+    if (dm) currentDigest = 'sha256:' + dm[1];
     let currentCreated = '';
     try {
       const cj = await dockerRequest('GET', `/containers/${encodeURIComponent('supabase-management')}/json`);
@@ -812,29 +812,55 @@ async function handleManagementTags(req, res, repo) {
         }
       }
     } catch {}
-    const latest = await ghcrLatestMeta(repoPath, 'latest');
-    if (!latest || !latest.digest) {
-      return sendJson(res, { error: 'GHCR unreachable' }, 502);
+    const token = await ghcrToken(repoPath);
+    if (!token) return sendJson(res, { error: 'GHCR token unavailable' }, 502);
+    const tl = await httpsGetRaw('ghcr.io', `/v2/${repoPath}/tags/list`, { Authorization: 'Bearer ' + token });
+    if (tl.status !== 200) return sendJson(res, { error: 'GHCR tags/list failed', status: tl.status }, 502);
+    let tagNames = [];
+    try { tagNames = JSON.parse(tl.body).tags || []; } catch {}
+    // Keep version tags (vX, vX.Y, vX.Y.Z), exclude 'latest' and junk.
+    const versionTags = tagNames.filter((t) => /^v\d+(\.\d+){0,2}$/.test(t));
+    // Resolve each to digest + created; cap concurrency implicitly by awaiting in parallel.
+    const resolved = await Promise.all(versionTags.map(async (name) => {
+      const meta = await ghcrLatestMeta(repoPath, name);
+      if (!meta || !meta.digest) return null;
+      return { name, digest: meta.digest, created: meta.created || '' };
+    }));
+    const tags = resolved.filter(Boolean).sort((a, b) => {
+      // Sort by created desc, fall back to semver-ish descending.
+      if (a.created && b.created) return b.created.localeCompare(a.created);
+      return b.name.localeCompare(a.name, undefined, { numeric: true });
+    }).map((t) => ({
+      name: t.name,
+      value: t.digest.replace(/^sha256:/, ''),
+      lastUpdated: t.created,
+      digest: t.digest,
+    }));
+    // Pick a display label for the current image: matching tag name if the
+    // pinned digest matches one, else the tag portion of IMAGE_MANAGEMENT, else short digest.
+    let currentTag = '';
+    if (currentDigest) {
+      const hit = tags.find((t) => t.digest === currentDigest);
+      if (hit) currentTag = hit.name;
     }
-    const latestHex = latest.digest.replace(/^sha256:/, '');
-    const currentHex = (currentDigest || '').replace(/^sha256:/, '');
-    const hasUpdate = latestHex && currentHex && latestHex !== currentHex;
-    const shortLatest = latestHex.slice(0, 12);
-    const shortCurrent = currentHex.slice(0, 12);
+    if (!currentTag) {
+      if (currentImage.includes('@sha256:')) {
+        currentTag = 'pinned@' + currentImage.split('@sha256:')[1].slice(0, 12);
+      } else if (currentImage.includes(':')) {
+        currentTag = currentImage.split(':').slice(1).join(':');
+      }
+    }
+    const latestDigest = tags[0] ? tags[0].digest : '';
+    const hasUpdate = !!(latestDigest && currentDigest && latestDigest !== currentDigest);
     sendJson(res, {
       service: 'management',
       repo,
       currentImage,
-      currentTag: shortCurrent || 'unknown',
+      currentTag: currentTag || 'unknown',
       currentCreated,
       currentDigest,
       hasUpdate,
-      tags: [{
-        name: shortLatest + (latest.created ? ' · ' + latest.created : ''),
-        value: latestHex,
-        lastUpdated: latest.created || '',
-        digest: latest.digest,
-      }],
+      tags,
     });
   } catch (err) {
     sendJson(res, { error: 'GHCR fetch failed', details: err.message }, 502);
