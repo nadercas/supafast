@@ -8,5 +8,7 @@ COPY package.json ./
 RUN npm install --production 2>/dev/null; exit 0
 COPY server.js ./
 COPY public ./public
+COPY migrations ./migrations
+COPY hostbin ./hostbin
 EXPOSE 3001
 CMD ["node", "server.js"]

@@ -93,7 +93,7 @@ function audit(req, action, target, result, extra) {
 
 const UPGRADABLE_SERVICES = new Set([
   'studio', 'kong', 'auth', 'rest', 'realtime', 'storage',
-  'imgproxy', 'meta', 'functions', 'analytics', 'vector', 'supavisor',
+  'imgproxy', 'meta', 'functions', 'analytics', 'vector', 'supavisor', 'management',
 ]);
 
 const SERVICE_TO_REPO = {
@@ -109,6 +109,7 @@ const SERVICE_TO_REPO = {
   analytics: 'supabase/logflare',
   vector: 'timberio/vector',
   supavisor: 'supabase/supavisor',
+  management: 'ghcr.io/nadercas/supafast',
 };
 
 const TAG_RE = /^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$/;
@@ -681,11 +682,73 @@ function httpsGetJson(host, reqPath) {
   });
 }
 
+function httpsGetRaw(host, reqPath, headers) {
+  return new Promise((resolve, reject) => {
+    const https = require('https');
+    const req = https.request({
+      hostname: host,
+      path: reqPath,
+      method: 'GET',
+      headers: Object.assign({ 'User-Agent': 'SupaFast/1.0' }, headers || {}),
+      timeout: 10000,
+    }, (r) => {
+      let data = '';
+      r.on('data', (c) => (data += c));
+      r.on('end', () => resolve({ status: r.statusCode, headers: r.headers, body: data }));
+    });
+    req.on('error', reject);
+    req.on('timeout', () => { req.destroy(new Error('timeout')); });
+    req.end();
+  });
+}
+
+// Ask ghcr.io for an anonymous pull token and return the bearer string, or '' on failure.
+async function ghcrToken(repoPath) {
+  const r = await httpsGetRaw('ghcr.io', `/token?scope=repository:${repoPath}:pull&service=ghcr.io`);
+  if (r.status !== 200) return '';
+  try { return JSON.parse(r.body).token || ''; } catch { return ''; }
+}
+
+// Fetch latest manifest + config blob for a GHCR image; return {digest, created}.
+async function ghcrLatestMeta(repoPath, ref) {
+  const token = await ghcrToken(repoPath);
+  if (!token) return null;
+  const manifestAccept = [
+    'application/vnd.oci.image.index.v1+json',
+    'application/vnd.oci.image.manifest.v1+json',
+    'application/vnd.docker.distribution.manifest.list.v2+json',
+    'application/vnd.docker.distribution.manifest.v2+json',
+  ].join(', ');
+  const authH = { Authorization: 'Bearer ' + token, Accept: manifestAccept };
+  const m = await httpsGetRaw('ghcr.io', `/v2/${repoPath}/manifests/${ref}`, authH);
+  if (m.status !== 200) return null;
+  const digest = m.headers['docker-content-digest'] || '';
+  let body; try { body = JSON.parse(m.body); } catch { return null; }
+  // Drill down through OCI index → single manifest → config blob.
+  let configDigest = body && body.config && body.config.digest;
+  if (!configDigest && Array.isArray(body.manifests) && body.manifests.length) {
+    const pick = body.manifests.find((x) => x.platform && x.platform.architecture === 'amd64') || body.manifests[0];
+    if (pick && pick.digest) {
+      const sub = await httpsGetRaw('ghcr.io', `/v2/${repoPath}/manifests/${pick.digest}`, authH);
+      if (sub.status === 200) { try { configDigest = JSON.parse(sub.body).config.digest; } catch {} }
+    }
+  }
+  let created = '';
+  if (configDigest) {
+    const blob = await httpsGetRaw('ghcr.io', `/v2/${repoPath}/blobs/${configDigest}`, { Authorization: 'Bearer ' + token });
+    if (blob.status === 200) { try { created = JSON.parse(blob.body).created || ''; } catch {} }
+  }
+  return { digest, created };
+}
+
 async function handleUpgradeTags(req, res, service) {
   if (!UPGRADABLE_SERVICES.has(service)) {
     return sendJson(res, { error: 'Service not upgradable via panel' }, 400);
   }
   const repo = SERVICE_TO_REPO[service];
+  if (service === 'management') {
+    return handleManagementTags(req, res, repo);
+  }
   try {
     const r = await httpsGetJson('hub.docker.com', `/v2/repositories/${repo}/tags/?page_size=50&ordering=last_updated`);
     if (r.status !== 200 || !r.data || !Array.isArray(r.data.results)) {
@@ -722,12 +785,69 @@ async function handleUpgradeTags(req, res, service) {
   }
 }
 
+// Management lives on GHCR, not Docker Hub. We surface the current pinned digest
+// and the latest digest available for :latest, with created timestamps for each,
+// so the UI can say "pushed X ago" and flag updates.
+async function handleManagementTags(req, res, repo) {
+  const repoPath = repo.replace(/^ghcr\.io\//, '');
+  try {
+    const env = readTopEnv();
+    const currentImage = env.get('IMAGE_MANAGEMENT') || '';
+    let currentDigest = '';
+    const m = currentImage.match(/@sha256:([a-f0-9]{64})/);
+    if (m) currentDigest = 'sha256:' + m[1];
+    // Current created timestamp from the locally pulled image.
+    let currentCreated = '';
+    try {
+      const cj = await dockerRequest('GET', `/containers/${encodeURIComponent('supabase-management')}/json`);
+      const imgId = cj.status === 200 && cj.data && cj.data.Image;
+      if (imgId) {
+        const ij = await dockerRequest('GET', `/images/${imgId}/json`);
+        if (ij.status === 200 && ij.data) {
+          currentCreated = ij.data.Created || '';
+          if (!currentDigest) {
+            const rd = (ij.data.RepoDigests || []).find((d) => d.startsWith(repo + '@'));
+            if (rd) currentDigest = rd.split('@')[1];
+          }
+        }
+      }
+    } catch {}
+    const latest = await ghcrLatestMeta(repoPath, 'latest');
+    if (!latest || !latest.digest) {
+      return sendJson(res, { error: 'GHCR unreachable' }, 502);
+    }
+    const latestHex = latest.digest.replace(/^sha256:/, '');
+    const currentHex = (currentDigest || '').replace(/^sha256:/, '');
+    const hasUpdate = latestHex && currentHex && latestHex !== currentHex;
+    const shortLatest = latestHex.slice(0, 12);
+    const shortCurrent = currentHex.slice(0, 12);
+    sendJson(res, {
+      service: 'management',
+      repo,
+      currentImage,
+      currentTag: shortCurrent || 'unknown',
+      currentCreated,
+      currentDigest,
+      hasUpdate,
+      tags: [{
+        name: shortLatest + (latest.created ? ' · ' + latest.created : ''),
+        value: latestHex,
+        lastUpdated: latest.created || '',
+        digest: latest.digest,
+      }],
+    });
+  } catch (err) {
+    sendJson(res, { error: 'GHCR fetch failed', details: err.message }, 502);
+  }
+}
+
 function imageEnvKey(service) {
   const map = {
     studio: 'IMAGE_STUDIO', kong: 'IMAGE_KONG', auth: 'IMAGE_AUTH',
     rest: 'IMAGE_REST', realtime: 'IMAGE_REALTIME', storage: 'IMAGE_STORAGE',
     imgproxy: 'IMAGE_IMGPROXY', meta: 'IMAGE_META', functions: 'IMAGE_FUNCTIONS',
     analytics: 'IMAGE_LOGFLARE', vector: 'IMAGE_VECTOR', supavisor: 'IMAGE_SUPAVISOR',
+    management: 'IMAGE_MANAGEMENT',
   };
   return map[service];
 }
@@ -738,11 +858,18 @@ async function handleUpgradeStart(req, res, service) {
   }
   const body = await readBody(req);
   const target = typeof body.target === 'string' ? body.target : '';
-  if (!TAG_RE.test(target)) {
-    return sendJson(res, { error: 'Invalid tag format' }, 400);
-  }
-  if (!isPinnableTag(target)) {
-    return sendJson(res, { error: 'Refusing to pin a floating tag (latest/main/edge/latest_arm64/etc.) — pick a versioned tag' }, 400);
+  if (service === 'management') {
+    // Management is pinned by digest (64-char lowercase hex), not by tag.
+    if (!/^[a-f0-9]{64}$/.test(target)) {
+      return sendJson(res, { error: 'Management upgrade target must be a sha256 digest' }, 400);
+    }
+  } else {
+    if (!TAG_RE.test(target)) {
+      return sendJson(res, { error: 'Invalid tag format' }, 400);
+    }
+    if (!isPinnableTag(target)) {
+      return sendJson(res, { error: 'Refusing to pin a floating tag (latest/main/edge/latest_arm64/etc.) — pick a versioned tag' }, 400);
+    }
   }
 
   try {
@@ -1028,6 +1155,242 @@ function readInitialKeyFromEnv() {
     };
   } catch {
     return null;
+  }
+}
+
+// ─── Versioned migrations ────────────────────────────────────────────────────
+// Migrations bundled into this image live at /app/migrations. Each is an
+// `NNN_slug.sh` entrypoint with an optional same-named asset directory. On
+// apply we copy the full set into ${SUPABASE_DIR}/upgrade/migrations/ (a rw
+// host bind-mount) and write a trigger file so the host runner fires.
+const MIGRATIONS_BUNDLED = path.resolve(__dirname, 'migrations');
+const MIGRATIONS_STAGING = path.join(UPGRADE_DIR, 'migrations');
+const MIGRATE_REQ_PATH = path.join(UPGRADE_DIR, 'migrate-request.json');
+const MIGRATE_RES_PATH = path.join(UPGRADE_DIR, 'migrate-result.json');
+const VERSION_FILE_PATH = path.join(SUPABASE_DIR, '.supafast-version');
+
+function parseMigrationHeader(filePath) {
+  // Reads leading comment lines and extracts @summary / @touches / @restarts.
+  try {
+    const raw = fs.readFileSync(filePath, 'utf8');
+    const header = {};
+    for (const line of raw.split('\n').slice(0, 20)) {
+      if (!line.startsWith('#')) {
+        if (line.trim() === '' || line.startsWith('#!')) continue;
+        break;
+      }
+      const m = line.match(/^#\s*@([a-z]+):\s*(.+?)\s*$/);
+      if (m) header[m[1]] = m[2];
+    }
+    return header;
+  } catch {
+    return {};
+  }
+}
+
+function listBundledMigrations() {
+  if (!fs.existsSync(MIGRATIONS_BUNDLED)) return [];
+  return fs.readdirSync(MIGRATIONS_BUNDLED)
+    .filter((f) => /^[0-9]{3}_.+\.sh$/.test(f))
+    .map((f) => ({
+      file: f,
+      num: parseInt(f.slice(0, 3), 10),
+      ...parseMigrationHeader(path.join(MIGRATIONS_BUNDLED, f)),
+    }))
+    .sort((a, b) => a.num - b.num);
+}
+
+function readVersionFile() {
+  try {
+    if (!fs.existsSync(VERSION_FILE_PATH)) return 0;
+    const n = parseInt(fs.readFileSync(VERSION_FILE_PATH, 'utf8').trim(), 10);
+    return Number.isFinite(n) ? n : 0;
+  } catch {
+    return 0;
+  }
+}
+
+// True for pre-6ed886c servers: cloud-init never seeded the version file and
+// the runner isn't installed. Detect via the :ro mount — .supafast-version
+// lives at the root of the docker dir which maps to /supabase.
+function needsBootstrap() {
+  return !fs.existsSync(VERSION_FILE_PATH);
+}
+
+function handleMigrationsBootstrap(req, res) {
+  try {
+    const hostbin = path.resolve(__dirname, 'hostbin');
+    const migrateB64 = Buffer.from(fs.readFileSync(path.join(hostbin, 'supafast-migrate.sh'), 'utf8'), 'utf8').toString('base64');
+    const pinB64 = Buffer.from(fs.readFileSync(path.join(hostbin, 'supabase-pin-digests.sh'), 'utf8'), 'utf8').toString('base64');
+    const script = `#!/bin/bash
+# SupaFast host-runner bootstrap. Idempotent — safe to re-run.
+# Installs /usr/local/bin/{supafast-migrate,supabase-pin-digests}.sh and their
+# systemd path units. Called by fresh cloud-init (once management is healthy)
+# and by the one-time SSH recipe for pre-6ed886c servers.
+set -euo pipefail
+echo "[bootstrap] installing supafast-migrate + supabase-pin-digests runners"
+echo "${migrateB64}" | base64 -d > /usr/local/bin/supafast-migrate.sh
+echo "${pinB64}" | base64 -d > /usr/local/bin/supabase-pin-digests.sh
+chmod 755 /usr/local/bin/supafast-migrate.sh /usr/local/bin/supabase-pin-digests.sh
+mkdir -p /opt/supabase/docker/upgrade/migrations
+[ -f /opt/supabase/docker/.supafast-version ] || echo 0 > /opt/supabase/docker/.supafast-version
+
+cat > /etc/systemd/system/supafast-migrate.service <<'SVC'
+[Unit]
+Description=SupaFast migration runner
+After=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/supabase/docker
+ExecStart=/usr/local/bin/supafast-migrate.sh
+SVC
+
+cat > /etc/systemd/system/supafast-migrate.path <<'PU'
+[Unit]
+Description=Watch migration request file
+
+[Path]
+PathModified=/opt/supabase/docker/upgrade/migrate-request.json
+Unit=supafast-migrate.service
+
+[Install]
+WantedBy=multi-user.target
+PU
+
+cat > /etc/systemd/system/supabase-pin.service <<'PSVC'
+[Unit]
+Description=SupaFast image digest pinning executor
+After=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/supabase/docker
+ExecStart=/usr/local/bin/supabase-pin-digests.sh
+PSVC
+
+cat > /etc/systemd/system/supabase-pin.path <<'PPU'
+[Unit]
+Description=Watch image pin request file
+
+[Path]
+PathModified=/opt/supabase/docker/upgrade/pin-request.json
+Unit=supabase-pin.service
+
+[Install]
+WantedBy=multi-user.target
+PPU
+
+systemctl daemon-reload
+systemctl enable --now supafast-migrate.path supabase-pin.path
+echo "[bootstrap] done — runners installed; apply pending migrations from the UI"
+`;
+    res.writeHead(200, { 'Content-Type': 'text/x-shellscript; charset=utf-8' });
+    res.end(script);
+  } catch (err) {
+    sendJson(res, { error: 'Failed to build bootstrap script', details: err.message }, 500);
+  }
+}
+
+function handleMigrationsStatus(req, res) {
+  const bundled = listBundledMigrations();
+  const latest = bundled.length ? bundled[bundled.length - 1].num : 0;
+  const current = readVersionFile();
+  const pending = bundled.filter((m) => m.num > current);
+  const bootstrap = needsBootstrap();
+  let lastResult = null;
+  try {
+    if (fs.existsSync(MIGRATE_RES_PATH)) {
+      lastResult = JSON.parse(fs.readFileSync(MIGRATE_RES_PATH, 'utf8'));
+    }
+  } catch {}
+  sendJson(res, { current, latest, pending, bootstrap, lastResult });
+}
+
+function copyRecursive(src, dst) {
+  const st = fs.statSync(src);
+  if (st.isDirectory()) {
+    fs.mkdirSync(dst, { recursive: true });
+    for (const entry of fs.readdirSync(src)) {
+      copyRecursive(path.join(src, entry), path.join(dst, entry));
+    }
+  } else {
+    fs.copyFileSync(src, dst);
+    fs.chmodSync(dst, st.mode & 0o777);
+  }
+}
+
+function handleMigrationsApply(req, res) {
+  try {
+    const bundled = listBundledMigrations();
+    if (bundled.length === 0) return sendJson(res, { error: 'No migrations bundled' }, 400);
+    const current = readVersionFile();
+    const pending = bundled.filter((m) => m.num > current);
+    if (pending.length === 0) return sendJson(res, { error: 'No pending migrations' }, 400);
+
+    fs.mkdirSync(MIGRATIONS_STAGING, { recursive: true });
+    // Stage every bundled migration (runner re-filters against version file) plus
+    // each same-named asset directory.
+    for (const { file } of bundled) {
+      const src = path.join(MIGRATIONS_BUNDLED, file);
+      const dst = path.join(MIGRATIONS_STAGING, file);
+      fs.copyFileSync(src, dst);
+      fs.chmodSync(dst, 0o755);
+      const assetSrc = path.join(MIGRATIONS_BUNDLED, file.replace(/\.sh$/, ''));
+      if (fs.existsSync(assetSrc) && fs.statSync(assetSrc).isDirectory()) {
+        const assetDst = path.join(MIGRATIONS_STAGING, file.replace(/\.sh$/, ''));
+        copyRecursive(assetSrc, assetDst);
+      }
+    }
+
+    const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    fs.writeFileSync(MIGRATE_RES_PATH, JSON.stringify({
+      id, status: 'pending', applied: 0, version: current, message: 'queued', at: new Date().toISOString(),
+    }));
+    const tmp = MIGRATE_REQ_PATH + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify({ id, at: new Date().toISOString() }));
+    fs.renameSync(tmp, MIGRATE_REQ_PATH);
+
+    audit(req, 'migrations.apply', 'migrations', 'queued', { id, pending: pending.map((p) => p.file) });
+    sendJson(res, { success: true, id, pending: pending.length });
+  } catch (err) {
+    sendJson(res, { error: 'Failed to queue migrations', details: err.message }, 500);
+  }
+}
+
+function handleMigrationsResult(req, res) {
+  try {
+    if (!fs.existsSync(MIGRATE_RES_PATH)) return sendJson(res, { status: 'unknown' });
+    sendJson(res, JSON.parse(fs.readFileSync(MIGRATE_RES_PATH, 'utf8')));
+  } catch (err) {
+    sendJson(res, { status: 'unknown', error: err.message });
+  }
+}
+
+function handleMigrationsSource(req, res, url) {
+  const name = new URL(url, 'http://_').searchParams.get('name') || '';
+  if (!/^[0-9]{3}_[A-Za-z0-9_]+\.sh$/.test(name)) {
+    return sendJson(res, { error: 'Invalid migration name' }, 400);
+  }
+  const p = path.join(MIGRATIONS_BUNDLED, name);
+  if (!fs.existsSync(p)) return sendJson(res, { error: 'Not found' }, 404);
+  res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+  res.end(fs.readFileSync(p, 'utf8'));
+}
+
+function handleMigrationsRevert(req, res) {
+  try {
+    const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    fs.writeFileSync(MIGRATE_RES_PATH, JSON.stringify({
+      id, status: 'pending', applied: 0, version: readVersionFile(), message: 'revert queued', at: new Date().toISOString(),
+    }));
+    const tmp = MIGRATE_REQ_PATH + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify({ id, mode: 'revert', at: new Date().toISOString() }));
+    fs.renameSync(tmp, MIGRATE_REQ_PATH);
+    audit(req, 'migrations.revert', 'migrations', 'queued', { id });
+    sendJson(res, { success: true, id });
+  } catch (err) {
+    sendJson(res, { error: 'Failed to queue revert', details: err.message }, 500);
   }
 }
 
@@ -1328,6 +1691,26 @@ const server = http.createServer(async (req, res) => {
     }
     if (urlPath === '/api/mcp' && method === 'GET') {
       return handleMcp(req, res);
+    }
+
+    // Migrations
+    if (urlPath === '/api/migrations/status' && method === 'GET') {
+      return handleMigrationsStatus(req, res);
+    }
+    if (urlPath === '/api/migrations/apply' && method === 'POST') {
+      return handleMigrationsApply(req, res);
+    }
+    if (urlPath === '/api/migrations/result' && method === 'GET') {
+      return handleMigrationsResult(req, res);
+    }
+    if (urlPath === '/api/migrations/bootstrap.sh' && method === 'GET') {
+      return handleMigrationsBootstrap(req, res);
+    }
+    if (urlPath === '/api/migrations/source' && method === 'GET') {
+      return handleMigrationsSource(req, res, req.url);
+    }
+    if (urlPath === '/api/migrations/revert' && method === 'POST') {
+      return handleMigrationsRevert(req, res);
     }
     const finalizeMatch = urlPath.match(/^\/api\/rotate-keys\/finalize\/([a-f0-9-]+)$/i);
     if (finalizeMatch && method === 'POST') {

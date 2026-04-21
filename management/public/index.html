@@ -329,6 +329,14 @@ restic restore &lt;snapshot-id&gt; --target "$RESTORE_DIR"</pre>
 
   <!-- Upgrades -->
   <div class="panel" id="panel-upgrades">
+    <h3 class="section-title">Platform Migrations</h3>
+    <div class="card mb-16" id="migrationsCard">
+      <p style="margin:0 0 8px 0;font-size:13px;color:var(--muted)">
+        Structural updates from newer SupaFast releases (new env vars, host scripts, systemd units). Each migration is idempotent and applied in order; a version marker at <code>/opt/supabase/docker/.supafast-version</code> tracks progress.
+      </p>
+      <div id="migrationsBody" style="font-size:13px">Loading…</div>
+    </div>
+
     <h3 class="section-title">Service Upgrades</h3>
     <div class="card mb-16">
       <p style="margin:0 0 8px 0;font-size:13px;color:var(--muted)">
@@ -953,6 +961,7 @@ function loadTab(tab) {
       loadSecrets();
       break;
     case 'upgrades':
+      loadMigrations();
       loadUpgrades();
       refreshTimer = setInterval(pollUpgradeStatus, 3000);
       break;
@@ -1129,6 +1138,166 @@ function esc(s) {
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 }
 
+async function loadMigrations() {
+  const body = document.getElementById('migrationsBody');
+  if (!body) return;
+  const s = await api('/api/migrations/status');
+  body.textContent = '';
+  if (!s) { body.textContent = 'Failed to load migration status.'; return; }
+  const { current = 0, latest = 0, pending = [], lastResult, bootstrap } = s;
+
+  if (bootstrap) {
+    const warn = document.createElement('div');
+    warn.style.cssText = 'padding:8px;border:1px solid var(--warning,#d97706);border-radius:4px;margin-bottom:8px;font-size:12px';
+    const t = document.createElement('div');
+    t.textContent = 'Migration runner not installed on this server. Run once over SSH to enable migrations:';
+    t.style.marginBottom = '6px';
+    warn.appendChild(t);
+    const pre = document.createElement('pre');
+    pre.style.cssText = 'margin:0;padding:6px;background:var(--bg-alt,#0001);overflow-x:auto;font-size:11px';
+    const origin = window.location.origin;
+    pre.textContent = `curl -fsSL ${origin}/api/migrations/bootstrap.sh | sudo bash`;
+    warn.appendChild(pre);
+    body.appendChild(warn);
+  }
+
+  const header = document.createElement('div');
+  header.className = 'flex-between';
+  const msg = document.createElement('span');
+  if (pending.length === 0) {
+    msg.textContent = `Up to date — version ${current} of ${latest}.`;
+    header.appendChild(msg);
+  } else {
+    msg.textContent = `${pending.length} pending migration${pending.length === 1 ? '' : 's'} (current ${current}, latest ${latest}).`;
+    header.appendChild(msg);
+    const btn = document.createElement('button');
+    btn.className = 'btn btn-sm';
+    btn.id = 'migrationsApplyBtn';
+    btn.textContent = 'Apply pending';
+    btn.onclick = applyMigrations;
+    header.appendChild(btn);
+  }
+  body.appendChild(header);
+
+  if (pending.length > 0) {
+    const list = document.createElement('div');
+    list.style.cssText = 'margin-top:8px;font-size:12px';
+    for (const p of pending) {
+      const item = document.createElement('div');
+      item.style.cssText = 'padding:6px;border:1px solid var(--border,#0002);border-radius:4px;margin-bottom:6px';
+      const row = document.createElement('div');
+      row.className = 'flex-between';
+      const head = document.createElement('div');
+      const code = document.createElement('code');
+      code.textContent = p.file;
+      head.appendChild(code);
+      if (p.summary) {
+        const s = document.createElement('span');
+        s.style.cssText = 'margin-left:8px;color:var(--muted)';
+        s.textContent = '— ' + p.summary;
+        head.appendChild(s);
+      }
+      row.appendChild(head);
+      const srcBtn = document.createElement('button');
+      srcBtn.className = 'btn btn-sm';
+      srcBtn.textContent = 'View source';
+      srcBtn.onclick = () => viewMigrationSource(p.file);
+      row.appendChild(srcBtn);
+      item.appendChild(row);
+      if (p.touches) {
+        const t = document.createElement('div');
+        t.style.cssText = 'color:var(--muted);font-size:11px;margin-top:4px';
+        t.textContent = 'Touches: ' + p.touches;
+        item.appendChild(t);
+      }
+      if (p.restarts) {
+        const t = document.createElement('div');
+        t.style.cssText = 'color:var(--muted);font-size:11px';
+        t.textContent = 'Restarts: ' + p.restarts;
+        item.appendChild(t);
+      }
+      list.appendChild(item);
+    }
+    body.appendChild(list);
+  }
+
+  if (lastResult) {
+    const div = document.createElement('div');
+    div.style.cssText = 'margin-top:8px;color:var(--muted);font-size:12px;display:flex;justify-content:space-between;align-items:center;gap:8px';
+    const txt = document.createElement('span');
+    txt.textContent = `Last run: ${lastResult.status} — ${lastResult.message || ''} (${lastResult.at || ''})`;
+    div.appendChild(txt);
+    if (lastResult.last_backup) {
+      const rv = document.createElement('button');
+      rv.className = 'btn btn-sm';
+      rv.textContent = 'Revert last';
+      rv.onclick = revertLastMigration;
+      div.appendChild(rv);
+    }
+    body.appendChild(div);
+  }
+}
+
+async function viewMigrationSource(name) {
+  const r = await fetch(BASE_PATH + '/api/migrations/source?name=' + encodeURIComponent(name), { headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+  if (!r.ok) { alert('Failed to load source'); return; }
+  const text = await r.text();
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:9999;display:flex;align-items:center;justify-content:center;padding:24px';
+  overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+  const modal = document.createElement('div');
+  modal.style.cssText = 'background:var(--bg,#fff);border-radius:6px;max-width:900px;width:100%;max-height:80vh;display:flex;flex-direction:column;padding:12px';
+  const hdr = document.createElement('div');
+  hdr.className = 'flex-between';
+  hdr.style.marginBottom = '8px';
+  const title = document.createElement('strong');
+  title.textContent = name;
+  hdr.appendChild(title);
+  const close = document.createElement('button');
+  close.className = 'btn btn-sm';
+  close.textContent = 'Close';
+  close.onclick = () => overlay.remove();
+  hdr.appendChild(close);
+  modal.appendChild(hdr);
+  const pre = document.createElement('pre');
+  pre.style.cssText = 'margin:0;padding:8px;background:var(--bg-alt,#0001);overflow:auto;font-size:11px;flex:1';
+  pre.textContent = text;
+  modal.appendChild(pre);
+  overlay.appendChild(modal);
+  document.body.appendChild(overlay);
+}
+
+async function revertLastMigration() {
+  if (!confirm('Revert the most recent migration? This restores .env, kong.yml, and docker-compose.yml from the last snapshot and recreates affected services.')) return;
+  const r = await api('/api/migrations/revert', { method: 'POST' });
+  if (!r || r.error) { alert((r && r.error) || 'Failed to queue revert'); return; }
+  const deadline = Date.now() + 120_000;
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    const res = await api('/api/migrations/result');
+    if (res && res.status && res.status !== 'pending') break;
+  }
+  await loadMigrations();
+}
+
+async function applyMigrations() {
+  const btn = document.getElementById('migrationsApplyBtn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Applying…'; }
+  const r = await api('/api/migrations/apply', { method: 'POST' });
+  if (!r || r.error) {
+    if (btn) { btn.disabled = false; btn.textContent = 'Apply pending'; }
+    alert((r && r.error) || 'Failed to queue migrations');
+    return;
+  }
+  const deadline = Date.now() + 120_000;
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    const res = await api('/api/migrations/result');
+    if (res && res.status && res.status !== 'pending') break;
+  }
+  await loadMigrations();
+}
+
 async function loadUpgrades() {
   const [current, dumps] = await Promise.all([
     api('/api/upgrade/current'),
@@ -1152,10 +1321,11 @@ function renderUpgradeTable(services) {
   const rows = Object.entries(services).map(([svc, info]) => {
     const cache = upgradeTagCache[svc];
     const latest = cache && cache.tags[0] ? esc(cache.tags[0].name) : '<span style="color:var(--muted)">loading...</span>';
-    const isCurrent = cache && cache.tags[0] && cache.tags[0].name === info.tag;
+    const isCurrent = cache && (cache.hasUpdate === false || (cache.tags[0] && cache.tags[0].name === info.tag));
     const tagOptions = cache ? cache.tags.slice(0, 20).map(t => {
       const name = esc(t.name);
-      return `<option value="${name}"${t.name === info.tag ? ' selected' : ''}>${name}</option>`;
+      const val = esc(t.value != null ? t.value : t.name);
+      return `<option value="${val}"${t.name === info.tag ? ' selected' : ''}>${name}</option>`;
     }).join('') : '';
     const selector = cache
       ? `<select id="tag-${esc(svc)}" style="padding:4px 6px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text);font-size:12px;max-width:110px">${tagOptions}</select>`
