@@ -337,7 +337,16 @@ restic restore &lt;snapshot-id&gt; --target "$RESTORE_DIR"</pre>
       <div id="migrationsBody" style="font-size:13px">Loading…</div>
     </div>
 
-    <h3 class="section-title">Service Upgrades</h3>
+    <h3 class="section-title">SupaFast Admin Panel</h3>
+    <div class="card mb-8" id="adminPanelUpgradeCard">
+      <p style="margin:0 0 10px 0;font-size:13px;color:var(--muted)">
+        This management UI and its migration runner ship as <code>ghcr.io/nadercas/supafast</code>. Upgrades here only touch the admin panel itself — no Supabase services are restarted.
+      </p>
+      <div id="adminPanelUpgradeBody" style="font-size:13px;color:var(--muted)">Loading…</div>
+    </div>
+    <div id="adminPanelUpgradeNotice" class="card mb-16" style="display:none;background:rgba(72,187,120,0.08);border-color:rgba(72,187,120,0.3)"></div>
+
+    <h3 class="section-title mt-16">Service Upgrades</h3>
     <div class="card mb-16">
       <p style="margin:0 0 8px 0;font-size:13px;color:var(--muted)">
         Upgrade stateless Supabase services to newer tags from Docker Hub. Each upgrade runs a <code>pg_dumpall</code> first (kept 14 days at <code>/var/backups/supabase/pre-upgrade/</code>), then pulls the new image, recreates the container, and auto-rolls back if it fails a 90-second healthcheck. Postgres upgrades are not exposed here.
@@ -1303,16 +1312,63 @@ async function loadUpgrades() {
     api('/api/upgrade/current'),
     api('/api/upgrade/dumps'),
   ]);
-  renderUpgradeTable(current ? current.services : {});
+  const services = current ? current.services : {};
+  const supabaseServices = {};
+  for (const [k, v] of Object.entries(services)) {
+    if (k !== 'management') supabaseServices[k] = v;
+  }
+  renderUpgradeTable(supabaseServices);
   renderDumps(dumps ? dumps.dumps : []);
+  loadAdminPanelUpgrade(services.management);
   if (current) {
-    for (const svc of Object.keys(current.services)) {
+    for (const svc of Object.keys(supabaseServices)) {
       api('/api/upgrade/tags/' + svc).then((data) => {
         if (!data || !data.tags || !data.tags.length) return;
         upgradeTagCache[svc] = data;
-        renderUpgradeTable(current.services);
+        renderUpgradeTable(supabaseServices);
       });
     }
+  }
+}
+
+async function loadAdminPanelUpgrade(info) {
+  const body = document.getElementById('adminPanelUpgradeBody');
+  const notice = document.getElementById('adminPanelUpgradeNotice');
+  if (!info) {
+    body.textContent = 'Management service not detected.';
+    notice.style.display = 'none';
+    return;
+  }
+  body.textContent = 'Fetching available versions…';
+  const data = await api('/api/upgrade/tags/management');
+  if (!data || !data.tags || !data.tags.length) {
+    body.innerHTML = `<span>Current: <code>${esc(info.tag || '?')}</code></span> <span style="color:var(--muted);margin-left:8px">(registry unreachable)</span>`;
+    notice.style.display = 'none';
+    return;
+  }
+  upgradeTagCache.management = data;
+  const currentLabel = data.currentTag || info.tag || '?';
+  const latest = data.tags[0];
+  const isCurrent = data.hasUpdate === false || latest.name === currentLabel;
+  const tagOptions = data.tags.slice(0, 20).map(t => {
+    const name = esc(t.name);
+    const val = esc(t.value != null ? t.value : t.name);
+    const sel = t.name === currentLabel ? ' selected' : '';
+    return `<option value="${val}"${sel}>${name}</option>`;
+  }).join('');
+  body.innerHTML = `
+    <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+      <div>Current: <code>${esc(currentLabel)}</code></div>
+      <div style="color:var(--muted)">Latest: <code>${esc(latest.name)}</code></div>
+      <div style="flex:1"></div>
+      <select id="tag-management" style="padding:4px 6px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text);font-size:12px;max-width:140px">${tagOptions}</select>
+      <button class="btn btn-sm btn-green" onclick="startUpgrade('management')"${isCurrent ? ' disabled' : ''}>Upgrade</button>
+    </div>`;
+  if (data.hasUpdate) {
+    notice.style.display = 'block';
+    notice.innerHTML = `<span style="color:#48bb78">●</span> <strong>${esc(latest.name)}</strong> is available. Upgrading is recommended to pick up new features and fixes.`;
+  } else {
+    notice.style.display = 'none';
   }
 }
 
