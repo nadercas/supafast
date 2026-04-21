@@ -2721,8 +2721,8 @@ elif [ "$TOTAL_RAM_MB" -ge 4096 ]; then FD=131072; SOMAX=2048; TCP_RMEM="4096 87
 else FD=131072; SOMAX=2048; TCP_RMEM="4096 87380 6291456"; TCP_WMEM="4096 65536 6291456"; NETDEV_BUDGET=300; fi
 
 cat > /etc/sysctl.d/99-performance.conf <<PERF
-fs.file-max = $FD
-fs.nr_open = $FD
+fs.file-max = 2097152
+fs.nr_open = 1048576
 net.core.somaxconn = $SOMAX
 net.core.netdev_max_backlog = 5000
 net.core.netdev_budget = $NETDEV_BUDGET
