@@ -8,7 +8,7 @@
 // everything baked into cloud-init as already applied. The management
 // container computes its own view of "latest" by scanning /app/migrations —
 // the two must stay in lockstep (tested by each PR that adds a migration).
-const LATEST_MIGRATION_VERSION = 3;
+const LATEST_MIGRATION_VERSION = 4;
 
 // ── Tar archive creation (browser-side) ─────────────────────────────────────
 // Minimal POSIX tar implementation for bundling static config files.
