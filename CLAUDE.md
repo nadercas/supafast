@@ -33,15 +33,36 @@ Dockerfile) and needs to reach running servers:
 1. If any `get*Sh()` generator in `cloudInitGenerator.js` was edited, run
    `node management/scripts/extract-runner.js` to refresh frozen copies in
    `management/hostbin/`.
-2. `docker buildx build --platform linux/amd64,linux/arm64 -t ghcr.io/nadercas/supafast:latest --push ./management`
-3. Commit the repo changes (generator + hostbin copies together).
-4. On each target server, pull the new image and recreate mgmt:
+2. Pick the next version tag (current latest on GHCR is `v1.3` — bump to
+   `v1.4`, `v1.5`, …). Build and push **from inside `management/`** tagging
+   both the version and `latest`:
+   ```
+   cd management
+   docker buildx build --platform linux/amd64,linux/arm64 \
+     -t ghcr.io/nadercas/supafast:vX.Y \
+     -t ghcr.io/nadercas/supafast:latest \
+     --push .
+   ```
+   Never skip the version tag — the admin panel's Upgrades dropdown lists
+   `/v2/.../tags/list` and filters to `^v\d+(\.\d+){0,2}$`. Tags that don't
+   match that regex don't appear.
+3. Bump `IMAGE_MANAGEMENT=ghcr.io/nadercas/supafast:vX.Y` in
+   `components/cloudInitGenerator.js` so fresh deploys pin to the new
+   version. Commit generator + hostbin copies + any migration changes in
+   one commit.
+4. On each target server, pull and recreate mgmt:
    `cd /opt/supabase/docker && sudo docker compose pull management && sudo docker compose up -d management`
+   If the server's `.env` still pins `IMAGE_MANAGEMENT=...@sha256:<digest>`
+   from a prior panel upgrade, pulling by digest gets you the same image.
+   Either use the panel's admin-panel Upgrade button (preferred) or
+   `sudo sed -i 's|^IMAGE_MANAGEMENT=.*|IMAGE_MANAGEMENT=ghcr.io/nadercas/supafast:vX.Y|' .env` first.
 5. If a host runner (`supafast-migrate.sh`, `supabase-pin-digests.sh`) changed,
    re-run the bootstrap endpoint so `/usr/local/bin/*.sh` and its systemd path
    unit get rewritten from the new image. Via docker bridge:
    `MGMT_IP=$(sudo docker inspect $(sudo docker compose ps -q management) -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' | head -1) && curl -fsSL http://$MGMT_IP:3001/api/migrations/bootstrap.sh | sudo bash`
-6. Open the panel → Upgrades tab → Apply pending if a new migration shipped.
+6. If recreating mgmt, also `sudo docker compose restart caddy` — Caddy
+   caches the container DNS and 502s until restarted.
+7. Open the panel → Upgrades tab → Apply pending if a new migration shipped.
 
 End-to-end sanity check after non-trivial changes: add a throwaway
 `003_noop.sh` migration with just `echo noop`, bump `LATEST_MIGRATION_VERSION`,
