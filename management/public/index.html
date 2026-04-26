@@ -384,6 +384,21 @@ restic restore &lt;snapshot-id&gt; --target "$RESTORE_DIR"</pre>
 
   <!-- Keys (new-format rotation) -->
   <div class="panel" id="panel-keys">
+    <details class="card mb-16" open style="border-left:3px solid var(--yellow)">
+      <summary style="cursor:pointer;user-select:none;font-weight:600;font-size:13px;display:flex;align-items:center;gap:8px">
+        <span style="color:var(--yellow);font-size:14px">⚠</span>
+        <span>Realtime compatibility — read before picking your client key</span>
+      </summary>
+      <div style="margin-top:10px;font-size:12.5px;line-height:1.55;color:var(--muted)">
+        <p style="margin:0 0 8px 0">
+          Self-hosted realtime verifies the websocket <code>apikey</code> as a JWT. Opaque <code>sb_publishable_</code> / <code>sb_secret_</code> keys are <strong>not JWTs</strong> and will fail with <code>MalformedJWT</code> on any realtime connection. They work fine for REST, Storage, and Edge Functions (validated at Kong).
+        </p>
+        <p style="margin:0">
+          <strong style="color:var(--text,#fff)">Frontend that uses <code>supabase-js</code> realtime channels</strong> → put the <em>legacy anon JWT</em> in your public env (see Legacy keys below).<br>
+          <strong style="color:var(--text,#fff)">HTTP-only frontend, backend code, edge functions, cron jobs</strong> → use the new <code>sb_publishable_</code> / <code>sb_secret_</code> keys above.
+        </p>
+      </div>
+    </details>
     <h3 class="section-title">API Key Rotation</h3>
     <div class="card mb-16">
       <p style="margin:0 0 8px 0;font-size:13px;color:var(--muted)">
@@ -400,11 +415,11 @@ restic restore &lt;snapshot-id&gt; --target "$RESTORE_DIR"</pre>
           <div style="display:flex;gap:6px;align-items:center"><code id="curUrl" style="flex:1;padding:6px 8px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-sm);word-break:break-all">…</code><button class="btn btn-sm" onclick="copyCur('curUrl')">Copy</button></div>
         </div>
         <div>
-          <div style="color:var(--muted);margin-bottom:4px">SUPABASE_PUBLISHABLE_KEY <span style="font-size:10px">(browser-safe, replaces anon key)</span></div>
+          <div style="color:var(--muted);margin-bottom:4px">SUPABASE_PUBLISHABLE_KEY <span style="font-size:10px">(browser-safe — REST/Storage/Functions only; not realtime — see note above)</span></div>
           <div style="display:flex;gap:6px;align-items:center"><code id="curPub" style="flex:1;padding:6px 8px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-sm);word-break:break-all">…</code><button class="btn btn-sm" onclick="copyCur('curPub')">Copy</button></div>
         </div>
         <div>
-          <div style="color:var(--muted);margin-bottom:4px">SUPABASE_SECRET_KEY <span style="font-size:10px;color:var(--red)">(server-only, replaces service_role key)</span></div>
+          <div style="color:var(--muted);margin-bottom:4px">SUPABASE_SECRET_KEY <span style="font-size:10px;color:var(--red)">(server-only — any service including realtime server-to-server)</span></div>
           <div style="display:flex;gap:6px;align-items:center"><code id="curSec" data-real="" style="flex:1;padding:6px 8px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-sm);word-break:break-all;font-family:monospace">••••••••</code><button class="btn btn-sm" onclick="toggleSecret()" id="curSecToggle">Reveal</button><button class="btn btn-sm" onclick="copyCur('curSec', true)">Copy</button></div>
         </div>
       </div>
@@ -423,14 +438,14 @@ restic restore &lt;snapshot-id&gt; --target "$RESTORE_DIR"</pre>
       </summary>
       <div style="padding:0 16px 14px 16px;display:flex;flex-direction:column;gap:10px;font-size:12px;border-top:1px solid var(--border)">
         <div style="color:var(--muted);font-size:11px;margin-top:10px">
-          These still work but are superseded by the publishable/secret keys above. Prefer the new keys in new code.
+          Still valid. The anon JWT is still required for any frontend that uses realtime websockets. <code>service_role</code> is fully superseded by the new secret key above.
         </div>
         <div>
-          <div style="color:var(--muted);margin-bottom:4px">SUPABASE_ANON_KEY <span style="font-size:10px">(legacy browser-safe)</span></div>
+          <div style="color:var(--muted);margin-bottom:4px">SUPABASE_ANON_KEY <span style="font-size:10px">(legacy browser-safe — required for frontends using realtime)</span></div>
           <div style="display:flex;gap:6px;align-items:center"><code id="curAnon" data-real="" style="flex:1;padding:6px 8px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-sm);word-break:break-all">••••••••</code><button class="btn btn-sm" onclick="toggleLegacy('curAnon', this)">Reveal</button><button class="btn btn-sm" onclick="copyCur('curAnon', true)">Copy</button></div>
         </div>
         <div>
-          <div style="color:var(--muted);margin-bottom:4px">SUPABASE_SERVICE_ROLE_KEY <span style="font-size:10px;color:var(--red)">(legacy server-only)</span></div>
+          <div style="color:var(--muted);margin-bottom:4px">SUPABASE_SERVICE_ROLE_KEY <span style="font-size:10px;color:var(--red)">(legacy server-only — superseded by SUPABASE_SECRET_KEY)</span></div>
           <div style="display:flex;gap:6px;align-items:center"><code id="curSrv" data-real="" style="flex:1;padding:6px 8px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-sm);word-break:break-all">••••••••</code><button class="btn btn-sm" onclick="toggleLegacy('curSrv', this)">Reveal</button><button class="btn btn-sm" onclick="copyCur('curSrv', true)">Copy</button></div>
         </div>
       </div>
@@ -1024,10 +1039,14 @@ async function loadCurrentKeys() {
   }
   const snippet =
     '# Browser / Next.js public\n' +
+    '# If your frontend uses Realtime (websockets), use the LEGACY anon JWT below.\n' +
+    '# Self-hosted realtime only accepts JWT-shaped apikeys; opaque sb_publishable_ keys\n' +
+    '# only work for REST / Storage / Functions via Kong. Pick one:\n' +
     'NEXT_PUBLIC_SUPABASE_URL=' + (cur.url || '') + '\n' +
-    'NEXT_PUBLIC_SUPABASE_ANON_KEY=' + (cur.publishable_key || '') + '\n' +
+    'NEXT_PUBLIC_SUPABASE_ANON_KEY=' + (cur.anon_key || '') + '   # legacy JWT (required if using realtime)\n' +
+    '# NEXT_PUBLIC_SUPABASE_ANON_KEY=' + (cur.publishable_key || '') + '   # new opaque key (HTTP-only, no realtime)\n' +
     '\n' +
-    '# Server-only\n' +
+    '# Server-only (safe everywhere — no realtime in server code)\n' +
     'SUPABASE_SECRET_KEY=' + (cur.secret_key || '') + '\n';
   const snipEl = document.getElementById('envSnippet');
   snipEl.dataset.real = snippet;

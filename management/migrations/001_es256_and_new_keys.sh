@@ -151,24 +151,23 @@ PY
 fi
 
 # ── 3. docker-compose.yml: add JWT_KEYS / JWT_JWKS env vars to services ──────
-if grep -q 'GOTRUE_JWT_KEYS' "$COMPOSE"; then
-  log "docker-compose.yml already patched — skipping"
-else
-  log "patching docker-compose.yml env vars for auth/rest/realtime/storage/meta"
-  cp -a "$COMPOSE" "$COMPOSE.mig001.bak"
+# Not short-circuited on GOTRUE_JWT_KEYS anymore: early versions of this migration
+# left `PGRST_JWT_SECRET: ${JWT_SECRET}` in the rest service (breaks ES256 verify).
+# The Python below is idempotent via add_env/upsert_env, so rerunning is safe.
+log "patching docker-compose.yml env vars for auth/rest/realtime/storage/meta (idempotent)"
+cp -a "$COMPOSE" "$COMPOSE.mig001.bak.$(date +%s)"
+{
   python3 - "$COMPOSE" <<'PY'
 import sys, re
 from pathlib import Path
 path = sys.argv[1]
 txt = Path(path).read_text()
 
-def add_env(text, service, env_line):
-    # Find '  service:\n' then the first '    environment:\n' inside its block.
+def _find_block(text, service):
     svc_re = re.compile(r'(^  ' + re.escape(service) + r':\n(?:(?! {0,2}\S).*\n)*?    environment:\n)', re.MULTILINE)
     m = svc_re.search(text)
-    if not m: return text
+    if not m: return None
     end = m.end()
-    # Determine the environment block extent (lines indented by 6+ spaces or blank).
     tail = text[end:]
     blk_end = 0
     for line in tail.split('\n'):
@@ -176,24 +175,48 @@ def add_env(text, service, env_line):
             blk_end += len(line) + 1
         else:
             break
-    block = text[end:end+blk_end]
+    return end, end + blk_end
+
+def add_env(text, service, env_line):
+    # Insert env_line if the key isn't already present in the service's env block.
+    loc = _find_block(text, service)
+    if loc is None: return text
+    start, end = loc
+    block = text[start:end]
     key = env_line.split(':')[0].strip()
     if re.search(r'^      ' + re.escape(key) + r'\s*:', block, re.MULTILINE):
         return text
-    return text[:end] + f"      {env_line}\n" + text[end:]
+    return text[:start] + f"      {env_line}\n" + text[start:]
+
+def upsert_env(text, service, env_line):
+    # Replace the existing key's line in the service's env block, or insert if absent.
+    loc = _find_block(text, service)
+    if loc is None: return text
+    start, end = loc
+    block = text[start:end]
+    key = env_line.split(':')[0].strip()
+    pat = re.compile(r'^      ' + re.escape(key) + r'\s*:.*\n', re.MULTILINE)
+    if pat.search(block):
+        new_block = pat.sub(f"      {env_line}\n", block, count=1)
+        return text[:start] + new_block + text[end:]
+    return text[:start] + f"      {env_line}\n" + text[start:]
 
 txt = add_env(txt, 'auth',     'GOTRUE_JWT_KEYS: ${JWT_KEYS}')
-txt = add_env(txt, 'rest',     'PGRST_JWT_SECRET: ${JWT_JWKS}')
+# PGRST_JWT_SECRET pre-exists as ${JWT_SECRET} in stock compose; must be replaced,
+# not skipped — otherwise PostgREST can't verify ES256 tokens after rotation.
+txt = upsert_env(txt, 'rest',  'PGRST_JWT_SECRET: ${JWT_JWKS}')
 txt = add_env(txt, 'realtime', 'API_JWT_JWKS: ${JWT_JWKS}')
+# realtime >= v2.86 requires METRICS_JWT_SECRET or crashes at boot.
+txt = add_env(txt, 'realtime', 'METRICS_JWT_SECRET: ${JWT_SECRET}')
 txt = add_env(txt, 'storage',  'JWT_JWKS: ${JWT_JWKS}')
 txt = add_env(txt, 'meta',     'JWT_JWKS: ${JWT_JWKS}')
 Path(path).write_text(txt)
 PY
-fi
+}
 
 # ── 4. Install hostbin scripts + systemd units ───────────────────────────────
 mkdir -p ./hostbin
-for s in supabase-rotate-keys.sh supabase-upgrade.sh supabase-pin-digests.sh; do
+for s in supabase-rotate-keys.sh supabase-upgrade.sh supabase-pin-digests.sh supabase-audit-jwt.sh; do
   src="$ASSETS/$s"
   [ -f "$src" ] || { log "WARN: asset $s missing; skipping"; continue; }
   if ! cmp -s "$src" "/usr/local/bin/$s" 2>/dev/null; then

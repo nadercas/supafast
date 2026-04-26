@@ -67,7 +67,7 @@ function base64Only(data) {
   return btoa(binary);
 }
 
-async function gzipAndBase64(data) {
+async function gzipBytes(data) {
   const cs = new CompressionStream('gzip');
   const writer = cs.writable.getWriter();
   writer.write(data);
@@ -83,12 +83,37 @@ async function gzipAndBase64(data) {
   const compressed = new Uint8Array(total);
   let off = 0;
   for (const c of chunks) { compressed.set(c, off); off += c.length; }
-  // Base64 encode
+  return compressed;
+}
+
+async function gzipAndBase64(data) {
+  const compressed = await gzipBytes(data);
   let binary = '';
-  for (let i = 0; i < compressed.length; i++) {
-    binary += String.fromCharCode(compressed[i]);
-  }
+  for (let i = 0; i < compressed.length; i++) binary += String.fromCharCode(compressed[i]);
   return btoa(binary);
+}
+
+// RFC 1924 / Python base64.b85encode alphabet — decoded by base64.b85decode on Ubuntu's
+// preinstalled python3. ~20% smaller than base64; needed to keep cloud-init under
+// Hetzner's 32 KiB user_data cap when all features are enabled.
+const B85_ALPHABET = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!#$%&()*+-;<=>?@^_`{|}~';
+function base85Encode(bytes) {
+  const pad = (4 - bytes.length % 4) % 4;
+  const padded = new Uint8Array(bytes.length + pad);
+  padded.set(bytes);
+  let out = '';
+  for (let i = 0; i < padded.length; i += 4) {
+    let n = padded[i] * 16777216 + padded[i+1] * 65536 + padded[i+2] * 256 + padded[i+3];
+    let chunk = '';
+    for (let j = 0; j < 5; j++) { chunk = B85_ALPHABET[n % 85] + chunk; n = Math.floor(n / 85); }
+    out += chunk;
+  }
+  return pad ? out.slice(0, out.length - pad) : out;
+}
+
+async function gzipAndBase85(data) {
+  const compressed = await gzipBytes(data);
+  return base85Encode(compressed);
 }
 
 // ── Static config file contents ─────────────────────────────────────────────
@@ -1729,7 +1754,7 @@ IMAGE_STUDIO=supabase/studio:2026.04.08-sha-205cbe7
 IMAGE_KONG=kong/kong:3.9.1
 IMAGE_AUTH=supabase/gotrue:v2.186.0
 IMAGE_REST=postgrest/postgrest:v14.8
-IMAGE_REALTIME=supabase/realtime:v2.76.5
+IMAGE_REALTIME=supabase/realtime:v2.86.3
 IMAGE_STORAGE=supabase/storage-api:v1.48.26
 IMAGE_IMGPROXY=darthsim/imgproxy:v3.30.1
 IMAGE_META=supabase/postgres-meta:v0.96.3
@@ -1737,7 +1762,7 @@ IMAGE_FUNCTIONS=supabase/edge-runtime:v1.71.2
 IMAGE_LOGFLARE=supabase/logflare:1.36.1
 IMAGE_VECTOR=timberio/vector:0.28.1-alpine
 IMAGE_SUPAVISOR=supabase/supavisor:2.7.4
-IMAGE_MANAGEMENT=ghcr.io/nadercas/supafast:v1.1.1
+IMAGE_MANAGEMENT=ghcr.io/nadercas/supafast:v1.1.2
 ${enableS3Backups ? `
 ############
 # Backups (S3)
@@ -1923,6 +1948,7 @@ services:
       DB_ENC_KEY: supabaserealtime
       API_JWT_SECRET: \${JWT_SECRET}
       API_JWT_JWKS: \${JWT_JWKS}
+      METRICS_JWT_SECRET: \${JWT_SECRET}
       SECRET_KEY_BASE: \${SECRET_KEY_BASE}
       ERL_AFLAGS: -proto_dist inet_tcp
       DNS_NODES: "''"
@@ -3297,19 +3323,16 @@ echo "DEPLOY_COMPLETED_AT:$(date -Iseconds)"
   // contents must be preserved byte-for-byte.
   const minified = minifyBashOutsideHeredocs(script);
 
-  // Check if script exceeds 32KB and gzip if needed
+  // If the minified script doesn't fit comfortably in Hetzner's 32 KiB user_data
+  // cap, wrap it in a gzip+base85 bootstrapper. Base85 (RFC 1924 / Python b85)
+  // is ~20% smaller than base64 and decoded by Ubuntu's preinstalled python3.
   const scriptBytes = new TextEncoder().encode(minified);
   if (scriptBytes.length > 16000) {
-    // Gzip the entire script and return as base64 — cloud-init auto-detects gzip
-    const gzipped = await gzipAndBase64(scriptBytes);
-    // cloud-init accepts gzipped user-data with Content-Type or auto-detection
-    // Hetzner passes raw user_data, cloud-init detects gzip magic bytes
-    // We need to return raw gzipped bytes as the user_data, not base64
-    // Actually, Hetzner's API accepts strings, so we use the #cloud-config + write_files approach
-    // OR: we can use the mime multipart approach
-    // Simplest: return a small bootstrapper that decodes the payload
+    const payload = await gzipAndBase85(scriptBytes);
     return `#!/bin/bash
-echo '${gzipped}' | base64 -d | gzip -d | bash
+python3 -c "import base64,gzip,sys;sys.stdout.buffer.write(gzip.decompress(base64.b85decode(sys.stdin.read().strip())))" <<'B85'|bash
+${payload}
+B85
 `;
   }
 
